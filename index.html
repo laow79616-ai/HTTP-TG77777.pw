@@ -245,8 +245,9 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
             </div>
             <h2>TG 管理面板</h2>
-            <input type="password" id="authKeyInput" placeholder="请输入认证密钥 (Auth Key)" onkeypress="if(event.key==='Enter')doLogin()">
-            <button class="btn btn-primary" onclick="doLogin()" style="width:100%">登录</button>
+            <input type="text" id="loginUsername" placeholder="用户名" style="margin-bottom:12px" onkeypress="if(event.key==='Enter')document.getElementById('loginPassword').focus()">
+            <input type="password" id="loginPassword" placeholder="密码" onkeypress="if(event.key==='Enter')doLogin()">
+            <button class="btn btn-primary" onclick="doLogin()" style="width:100%;margin-top:12px">登录</button>
         </div>
     </div>
 
@@ -478,30 +479,34 @@
         let shouldStop = false;
 
         // ==================== Auth ====================
+        const VALID_USER = 'admin';
+        const VALID_PASS = 'Ab23456987';
+
         function doLogin() {
-            const key = document.getElementById('authKeyInput').value.trim();
-            if (!key) { showToast('请输入认证密钥'); return; }
-            AUTH_KEY = key;
-            localStorage.setItem('tg_auth_key', key);
-            // Test connection
+            const username = document.getElementById('loginUsername').value.trim();
+            const password = document.getElementById('loginPassword').value.trim();
+            if (!username || !password) { showToast('请输入用户名和密码'); return; }
+            if (username !== VALID_USER || password !== VALID_PASS) {
+                showToast('用户名或密码错误'); return;
+            }
+            AUTH_KEY = 'fe570f573d2840308f6a298daa3ad4a0';
+            localStorage.setItem('tg_auth_key', AUTH_KEY);
+            localStorage.setItem('tg_logged_in', 'true');
+            document.getElementById('loginOverlay').style.display = 'none';
+            document.getElementById('mainContent').style.display = 'block';
             apiCall('/api/status').then(data => {
-                document.getElementById('loginOverlay').style.display = 'none';
-                document.getElementById('mainContent').style.display = 'block';
                 loadDashboard(data);
-            }).catch(err => {
-                showToast('认证失败: ' + err.message);
-            });
+            }).catch(() => {});
         }
 
         function checkAuth() {
-            if (AUTH_KEY) {
+            if (localStorage.getItem('tg_logged_in') === 'true') {
+                AUTH_KEY = 'fe570f573d2840308f6a298daa3ad4a0';
+                document.getElementById('loginOverlay').style.display = 'none';
+                document.getElementById('mainContent').style.display = 'block';
                 apiCall('/api/status').then(data => {
-                    document.getElementById('loginOverlay').style.display = 'none';
-                    document.getElementById('mainContent').style.display = 'block';
                     loadDashboard(data);
-                }).catch(() => {
-                    document.getElementById('loginOverlay').style.display = 'flex';
-                });
+                }).catch(() => {});
             }
         }
 
