@@ -404,6 +404,7 @@
                     <button class="btn btn-secondary" onclick="clearCheck()">清空</button>
                     <button class="btn btn-success" onclick="exportResults('all')">导出全部</button>
                     <button class="btn btn-secondary" onclick="exportResults('available')">导出可用</button>
+                    <button class="btn btn-warning" onclick="restoreData()">恢复数据</button>
                 </div>
             </div>
 
@@ -775,6 +776,24 @@
             const content = data.map(r => `@${r.username}`).join('\n');
             downloadFile(content, `tg_check_${type}_${new Date().toISOString().slice(0,10)}.txt`);
             showToast('已导出 ' + data.length + ' 条');
+        }
+
+        async function restoreData() {
+            try {
+                showToast('正在恢复数据...');
+                const resp = await fetch('/tg_check_available.txt');
+                if (!resp.ok) throw new Error('File not found');
+                const text = await resp.text();
+                const usernames = text.split('\n').map(u => u.trim().replace(/^@/, '')).filter(u => u.length > 0);
+                checkResults = usernames.map(u => ({ username: u, status: 'available', time: '已恢复' }));
+                document.getElementById('checkStats').style.display = 'grid';
+                document.getElementById('checkResultsSection').style.display = 'block';
+                updateCheckStats();
+                renderCheckResults();
+                showToast('已恢复 ' + usernames.length + ' 条可用用户名数据');
+            } catch(e) {
+                showToast('恢复失败: ' + e.message);
+            }
         }
 
         // ==================== Keyword Filter ====================
