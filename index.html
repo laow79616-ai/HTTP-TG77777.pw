@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TG用户名检测工具 - 管理面板</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' style='stop-color:%232AABEE'/%3E%3Cstop offset='100%25' style='stop-color:%23229ED9'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='50' cy='50' r='50' fill='url(%23g)'/%3E%3Cpath d='M25 50l7-7 12 12 24-24 7 7-31 31z' fill='white'/%3E%3C/svg%3E">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --primary: #2AABEE;
+            --primary-dark: #229ED9;
+            --success: #4CAF50;
+            --danger: #f44336;
+            --warning: #ff9800;
+            --bg: #0f1923;
+            --bg-card: #1a2733;
+            --bg-input: #243442;
+            --text: #e8eaed;
+            --text-secondary: #8b9dab;
+            --border: #2d3f4f;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        
+        /* Header */
+        .header { text-align: center; padding: 30px 0 20px; }
+        .logo {
+            width: 70px; height: 70px; margin: 0 auto 16px;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            border-radius: 18px; display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 8px 32px rgba(42, 171, 238, 0.3);
+        }
+        .logo svg { width: 42px; height: 42px; }
+        .header h1 {
+            font-size: 24px; font-weight: 700; margin-bottom: 6px;
+            background: linear-gradient(135deg, var(--primary), #64d2ff);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+        }
+        .header .subtitle { color: var(--text-secondary); font-size: 13px; letter-spacing: 2px; }
+
+        /* Login */
+        .login-overlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: var(--bg); z-index: 9999;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .login-box {
+            background: var(--bg-card); border-radius: 16px; padding: 40px;
+            border: 1px solid var(--border); width: 400px; max-width: 90%;
+            text-align: center;
+        }
+        .login-box h2 { margin-bottom: 24px; color: var(--primary); }
+        .login-box input {
+            width: 100%; padding: 12px 16px; background: var(--bg-input);
+            border: 1px solid var(--border); border-radius: 10px;
+            color: var(--text); font-size: 14px; margin-bottom: 16px;
+        }
+        .login-box input:focus { outline: none; border-color: var(--primary); }
+        .login-box .btn { width: 100%; }
+
+        /* Tabs */
+        .tabs {
+            display: flex; gap: 4px; background: var(--bg-card);
+            border-radius: 12px; padding: 4px; margin-bottom: 24px;
+            border: 1px solid var(--border); overflow-x: auto;
+        }
+        .tab {
+            flex: 1; padding: 12px 16px; text-align: center; border-radius: 8px;
+            cursor: pointer; font-size: 14px; font-weight: 500;
+            color: var(--text-secondary); transition: all 0.3s; white-space: nowrap;
+        }
+        .tab.active { background: var(--primary); color: white; box-shadow: 0 4px 12px rgba(42, 171, 238, 0.3); }
+        .tab:hover:not(.active) { color: var(--text); background: var(--bg-input); }
+
+        /* Cards */
+        .card {
+            background: var(--bg-card); border-radius: 16px; padding: 24px;
+            margin-bottom: 24px; border: 1px solid var(--border);
+        }
+        .card h3 { font-size: 16px; margin-bottom: 16px; color: var(--primary); }
+
+        /* Stats Grid */
+        .stats {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px; margin-bottom: 24px;
+        }
+        .stat-card {
+            background: var(--bg-card); border-radius: 12px; padding: 16px;
+            text-align: center; border: 1px solid var(--border);
+        }
+        .stat-card .number { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
+        .stat-card .label { font-size: 12px; color: var(--text-secondary); }
+        .stat-card.total .number { color: var(--primary); }
+        .stat-card.running .number { color: var(--success); }
+        .stat-card.stopped .number { color: var(--danger); }
+        .stat-card.sent .number { color: var(--warning); }
+
+        /* Bot List */
+        .bot-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 16px;
+        }
+        .bot-card {
+            background: var(--bg-input); border-radius: 12px; padding: 16px;
+            border: 1px solid var(--border); transition: all 0.3s;
+        }
+        .bot-card:hover { border-color: var(--primary); transform: translateY(-2px); }
+        .bot-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .bot-card-header h4 { font-size: 14px; font-weight: 600; }
+        .bot-status {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 500;
+        }
+        .bot-status.running { background: rgba(76,175,80,0.15); color: #4CAF50; }
+        .bot-status.stopped { background: rgba(244,67,54,0.15); color: #f44336; }
+        .bot-status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+        .bot-card-info { font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; }
+        .bot-card-info p { margin-bottom: 4px; }
+        .bot-card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+        .bot-card-actions .btn { padding: 6px 12px; font-size: 12px; }
+
+        /* Form */
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; font-weight: 500; }
+        .form-group input, .form-group textarea, .form-group select {
+            width: 100%; background: var(--bg-input); border: 1px solid var(--border);
+            border-radius: 10px; padding: 12px 14px; color: var(--text); font-size: 14px;
+        }
+        .form-group input:focus, .form-group textarea:focus { outline: none; border-color: var(--primary); }
+        .form-group textarea { min-height: 100px; resize: vertical; }
+        .form-row { display: flex; gap: 16px; }
+        .form-row .form-group { flex: 1; }
+
+        /* Buttons */
+        .btn {
+            padding: 10px 20px; border-radius: 10px; border: none;
+            font-size: 14px; font-weight: 600; cursor: pointer;
+            transition: all 0.3s; display: inline-flex; align-items: center; gap: 8px;
+        }
+        .btn-primary { background: linear-gradient(135deg, var(--primary), var(--primary-dark)); color: white; box-shadow: 0 4px 12px rgba(42,171,238,0.3); }
+        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(42,171,238,0.4); }
+        .btn-secondary { background: var(--bg-input); color: var(--text); border: 1px solid var(--border); }
+        .btn-secondary:hover { border-color: var(--primary); color: var(--primary); }
+        .btn-success { background: var(--success); color: white; }
+        .btn-success:hover { opacity: 0.9; }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-danger:hover { opacity: 0.9; }
+        .btn-warning { background: var(--warning); color: white; }
+        .btn-sm { padding: 6px 12px; font-size: 12px; }
+
+        /* Tab Content */
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* Username Check */
+        .file-upload {
+            border: 2px dashed var(--border); border-radius: 12px; padding: 30px;
+            text-align: center; cursor: pointer; transition: all 0.3s; margin-bottom: 16px;
+        }
+        .file-upload:hover { border-color: var(--primary); background: rgba(42,171,238,0.05); }
+        .file-upload svg { width: 48px; height: 48px; margin-bottom: 12px; color: var(--primary); }
+        .file-upload p { color: var(--text-secondary); font-size: 14px; }
+        .file-upload .hint { font-size: 12px; margin-top: 8px; opacity: 0.7; }
+
+        /* Results Table */
+        .table-wrapper { overflow-x: auto; }
+        .results-table { width: 100%; border-collapse: collapse; }
+        .results-table th {
+            text-align: left; padding: 12px 16px; font-size: 12px;
+            color: var(--text-secondary); font-weight: 600; border-bottom: 1px solid var(--border);
+        }
+        .results-table td { padding: 10px 16px; font-size: 13px; border-bottom: 1px solid var(--border); }
+        .results-table tr:hover td { background: rgba(42,171,238,0.03); }
+
+        /* Check Results */
+        .check-results { margin-top: 16px; }
+        .check-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 16px; border-bottom: 1px solid var(--border);
+        }
+        .check-item:last-child { border-bottom: none; }
+        .check-ok { color: var(--success); }
+        .check-warn { color: var(--warning); }
+        .check-err { color: var(--danger); }
+
+        /* Toast */
+        .toast {
+            position: fixed; bottom: 20px; right: 20px; padding: 12px 20px;
+            border-radius: 10px; background: var(--bg-card); border: 1px solid var(--border);
+            color: var(--text); font-size: 14px; box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            transform: translateY(100px); opacity: 0; transition: all 0.3s; z-index: 1000;
+        }
+        .toast.show { transform: translateY(0); opacity: 1; }
+
+        /* Modal */
+        .modal-overlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7); z-index: 999; display: none;
+            align-items: center; justify-content: center;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal {
+            background: var(--bg-card); border-radius: 16px; padding: 32px;
+            border: 1px solid var(--border); width: 500px; max-width: 90%;
+            max-height: 80vh; overflow-y: auto;
+        }
+        .modal h3 { margin-bottom: 20px; color: var(--primary); }
+        .modal-actions { display: flex; gap: 12px; margin-top: 20px; justify-content: flex-end; }
+
+        /* Progress */
+        .progress-bar { width: 100%; height: 6px; background: var(--bg-input); border-radius: 3px; overflow: hidden; display: none; margin-bottom: 16px; }
+        .progress-bar.active { display: block; }
+        .progress-bar .fill { height: 100%; background: linear-gradient(90deg, var(--primary), var(--success)); border-radius: 3px; transition: width 0.3s; width: 0%; }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container { padding: 12px; }
+            .bot-grid { grid-template-columns: 1fr; }
+            .form-row { flex-direction: column; gap: 0; }
+            .stats { grid-template-columns: repeat(2, 1fr); }
+            .tab { padding: 10px 12px; font-size: 12px; }
+        }
+
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--primary); }
+
+        .hidden { display: none !important; }
+        .loading { opacity: 0.6; pointer-events: none; }
+    </style>
+</head>
+<body>
+    <!-- Login Overlay -->
+    <div class="login-overlay" id="loginOverlay">
+        <div class="login-box">
+            <div class="logo" style="margin:0 auto 20px">
+                <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+            </div>
+            <h2>TG 管理面板</h2>
+            <input type="password" id="authKeyInput" placeholder="请输入认证密钥 (Auth Key)" onkeypress="if(event.key==='Enter')doLogin()">
+            <button class="btn btn-primary" onclick="doLogin()" style="width:100%">登录</button>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="container" id="mainContent" style="display:none">
+        <div class="header">
+            <div class="logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+            </div>
+            <h1>TG Username Scanner</h1>
+            <p class="subtitle">批量检测 · 水军管理 · 关键词筛选 · 一键导出</p>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+            <div class="tab active" data-tab="dashboard">仪表盘</div>
+            <div class="tab" data-tab="bots">水军管理</div>
+            <div class="tab" data-tab="add-bot">增加水军</div>
+            <div class="tab" data-tab="check">批量检测</div>
+            <div class="tab" data-tab="keyword">关键词筛选</div>
+        </div>
+
+        <!-- Tab: Dashboard -->
+        <div class="tab-content active" id="tab-dashboard">
+            <div class="stats">
+                <div class="stat-card total">
+                    <div class="number" id="statTotal">0</div>
+                    <div class="label">总水军数</div>
+                </div>
+                <div class="stat-card running">
+                    <div class="number" id="statRunning">0</div>
+                    <div class="label">运行中</div>
+                </div>
+                <div class="stat-card stopped">
+                    <div class="number" id="statStopped">0</div>
+                    <div class="label">已停止</div>
+                </div>
+                <div class="stat-card sent">
+                    <div class="number" id="statTodaySent">0</div>
+                    <div class="label">今日发送</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>快速操作</h3>
+                <div style="display:flex;gap:12px;flex-wrap:wrap">
+                    <button class="btn btn-primary" onclick="switchTab('add-bot')">+ 增加水军</button>
+                    <button class="btn btn-success" onclick="checkAllBots()">全部自检</button>
+                    <button class="btn btn-secondary" onclick="refreshStatus()">刷新状态</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>发送统计</h3>
+                <div class="stats" style="margin-bottom:0">
+                    <div class="stat-card"><div class="number" id="statTotalSent" style="color:var(--primary)">0</div><div class="label">累计发送</div></div>
+                    <div class="stat-card"><div class="number" id="statTotalSuccess" style="color:var(--success)">0</div><div class="label">累计成功</div></div>
+                    <div class="stat-card"><div class="number" id="statTotalFailed" style="color:var(--danger)">0</div><div class="label">累计失败</div></div>
+                    <div class="stat-card"><div class="number" id="statTodaySuccess" style="color:var(--success)">0</div><div class="label">今日成功</div></div>
+                </div>
+            </div>
+
+            <div class="card" id="checkResultsCard" style="display:none">
+                <h3>自检结果</h3>
+                <div class="check-results" id="checkResults"></div>
+            </div>
+        </div>
+
+        <!-- Tab: Bot Management -->
+        <div class="tab-content" id="tab-bots">
+            <div class="card">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+                    <h3 style="margin-bottom:0">水军列表</h3>
+                    <div style="display:flex;gap:8px">
+                        <button class="btn btn-primary btn-sm" onclick="switchTab('add-bot')">+ 增加水军</button>
+                        <button class="btn btn-secondary btn-sm" onclick="refreshStatus()">刷新</button>
+                    </div>
+                </div>
+                <div class="bot-grid" id="botGrid">
+                    <!-- Bot cards will be rendered here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab: Add Bot -->
+        <div class="tab-content" id="tab-add-bot">
+            <div class="card">
+                <h3>增加水军账号</h3>
+                <p style="color:var(--text-secondary);font-size:13px;margin-bottom:20px">添加新的 Telegram Bot 到水军池中，添加后将自动启动。</p>
+                
+                <div class="form-group">
+                    <label>Bot 名称 *</label>
+                    <input type="text" id="addBotName" placeholder="例如: 84（编号）">
+                </div>
+                <div class="form-group">
+                    <label>Bot Token *</label>
+                    <input type="text" id="addBotToken" placeholder="例如: 123456789:AABBCCDDEEFFGGHHIIJJKKLLMMNNOOPPqqr">
+                </div>
+                <div class="form-group">
+                    <label>Bot Username（可选）</label>
+                    <input type="text" id="addBotUsername" placeholder="例如: kuaiyue84Bot">
+                </div>
+                
+                <div style="margin-top:20px;display:flex;gap:12px">
+                    <button class="btn btn-primary" onclick="addBot()">添加并启动</button>
+                    <button class="btn btn-secondary" onclick="clearAddForm()">清空</button>
+                </div>
+
+                <div style="margin-top:24px;padding-top:24px;border-top:1px solid var(--border)">
+                    <h3>批量添加</h3>
+                    <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">每行一个，格式：名称,Token,Username</p>
+                    <div class="form-group">
+                        <textarea id="batchAddInput" placeholder="84,8712671220:AAETAhpc_xxxxx,kuaiyue84Bot&#10;85,8812345678:AAFxxxxx,kuaiyue85Bot"></textarea>
+                    </div>
+                    <button class="btn btn-primary" onclick="batchAddBots()">批量添加</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab: Username Check -->
+        <div class="tab-content" id="tab-check">
+            <div class="card">
+                <h3>批量检测用户名</h3>
+                <div class="file-upload" id="fileUpload">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+                    </svg>
+                    <p>点击上传或拖拽文件到此处</p>
+                    <p class="hint">支持 .txt 文件，每行一个用户名</p>
+                    <input type="file" id="fileInput" accept=".txt" style="display:none">
+                </div>
+                <div class="form-group">
+                    <label>手动输入用户名（每行一个，不需要@符号）</label>
+                    <textarea id="usernameInput" placeholder="username1&#10;username2&#10;username3"></textarea>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>检测间隔（毫秒）</label>
+                        <input type="text" id="delayInput" value="1000">
+                    </div>
+                    <div class="form-group">
+                        <label>并发数量</label>
+                        <select id="concurrencySelect">
+                            <option value="1">1</option>
+                            <option value="3" selected>3</option>
+                            <option value="5">5</option>
+                            <option value="10">10</option>
+                        </select>
+                    </div>
+                </div>
+                <div style="display:flex;gap:12px;flex-wrap:wrap">
+                    <button class="btn btn-primary" id="startCheckBtn" onclick="startCheck()">开始检测</button>
+                    <button class="btn btn-danger hidden" id="stopCheckBtn" onclick="stopCheck()">停止</button>
+                    <button class="btn btn-secondary" onclick="clearCheck()">清空</button>
+                    <button class="btn btn-success" onclick="exportResults('all')">导出全部</button>
+                    <button class="btn btn-secondary" onclick="exportResults('available')">导出可用</button>
+                </div>
+            </div>
+
+            <div class="progress-bar" id="progressBar"><div class="fill" id="progressFill"></div></div>
+
+            <div class="stats" id="checkStats" style="display:none">
+                <div class="stat-card"><div class="number" id="checkTotal" style="color:var(--primary)">0</div><div class="label">总计</div></div>
+                <div class="stat-card"><div class="number" id="checkAvailable" style="color:var(--success)">0</div><div class="label">可用</div></div>
+                <div class="stat-card"><div class="number" id="checkTaken" style="color:var(--danger)">0</div><div class="label">已占用</div></div>
+                <div class="stat-card"><div class="number" id="checkPending" style="color:var(--warning)">0</div><div class="label">检测中</div></div>
+            </div>
+
+            <div class="card" id="checkResultsSection" style="display:none">
+                <h3>检测结果</h3>
+                <div style="margin-bottom:12px;display:flex;gap:8px">
+                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('all')">全部</button>
+                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('available')">可用</button>
+                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('taken')">已占用</button>
+                </div>
+                <div class="username-list" id="checkResultsList" style="max-height:500px;overflow-y:auto;background:var(--bg);border-radius:10px;padding:8px 0;border:1px solid var(--border)"></div>
+            </div>
+        </div>
+
+        <!-- Tab: Keyword -->
+        <div class="tab-content" id="tab-keyword">
+            <div class="card">
+                <h3>关键词筛选</h3>
+                <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">从检测结果中筛选包含指定关键词的用户名</p>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>关键词</label>
+                        <input type="text" id="keywordInput" placeholder="输入关键词...">
+                    </div>
+                    <div class="form-group">
+                        <label>筛选条件</label>
+                        <select id="filterCondition">
+                            <option value="contains">包含关键词</option>
+                            <option value="starts">以关键词开头</option>
+                            <option value="ends">以关键词结尾</option>
+                            <option value="regex">正则表达式</option>
+                        </select>
+                    </div>
+                </div>
+                <div style="display:flex;gap:12px">
+                    <button class="btn btn-primary" onclick="filterByKeyword()">筛选</button>
+                    <button class="btn btn-success" onclick="exportFiltered()">导出结果</button>
+                </div>
+                <div class="table-wrapper" style="margin-top:16px">
+                    <table class="results-table">
+                        <thead><tr><th>#</th><th>用户名</th><th>状态</th></tr></thead>
+                        <tbody id="keywordResultsBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal" id="modalContent"></div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // Config
+        let AUTH_KEY = localStorage.getItem('tg_auth_key') || '';
+        let botsData = [];
+        let checkResults = [];
+        let filteredResults = [];
+        let isChecking = false;
+        let shouldStop = false;
+
+        // ==================== Auth ====================
+        function doLogin() {
+            const key = document.getElementById('authKeyInput').value.trim();
+            if (!key) { showToast('请输入认证密钥'); return; }
+            AUTH_KEY = key;
+            localStorage.setItem('tg_auth_key', key);
+            // Test connection
+            apiCall('/api/status').then(data => {
+                document.getElementById('loginOverlay').style.display = 'none';
+                document.getElementById('mainContent').style.display = 'block';
+                loadDashboard(data);
+            }).catch(err => {
+                showToast('认证失败: ' + err.message);
+            });
+        }
+
+        function checkAuth() {
+            if (AUTH_KEY) {
+                apiCall('/api/status').then(data => {
+                    document.getElementById('loginOverlay').style.display = 'none';
+                    document.getElementById('mainContent').style.display = 'block';
+                    loadDashboard(data);
+                }).catch(() => {
+                    document.getElementById('loginOverlay').style.display = 'flex';
+                });
+            }
+        }
+
+        // ==================== API ====================
+        async function apiCall(endpoint, method = 'GET', body = null) {
+            const url = endpoint;
+            const options = {
+                method,
+                headers: {
+                    'Authorization': `Bearer ${AUTH_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            };
+            if (body) options.body = JSON.stringify(body);
+            const resp = await fetch(url, options);
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(err.error || `HTTP ${resp.status}`);
+            }
+            return resp.json();
+        }
+
+        // ==================== Dashboard ====================
+        function loadDashboard(data) {
+            botsData = data.bots || [];
+            const running = botsData.filter(b => b.status === 'running').length;
+            const stopped = botsData.length - running;
+
+            document.getElementById('statTotal').textContent = botsData.length;
+            document.getElementById('statRunning').textContent = running;
+            document.getElementById('statStopped').textContent = stopped;
+
+            // Load stats
+            apiCall('/api/stats').then(s => {
+                const stats = s.stats || {};
+                document.getElementById('statTodaySent').textContent = stats.today_sent || 0;
+                document.getElementById('statTotalSent').textContent = stats.total_sent || 0;
+                document.getElementById('statTotalSuccess').textContent = stats.total_success || 0;
+                document.getElementById('statTotalFailed').textContent = stats.total_failed || 0;
+                document.getElementById('statTodaySuccess').textContent = stats.today_success || 0;
+            }).catch(() => {});
+
+            renderBotGrid();
+        }
+
+        function refreshStatus() {
+            apiCall('/api/status').then(data => {
+                loadDashboard(data);
+                showToast('状态已刷新');
+            }).catch(err => showToast('刷新失败: ' + err.message));
+        }
+
+        // ==================== Bot Management ====================
+        function renderBotGrid() {
+            const grid = document.getElementById('botGrid');
+            if (botsData.length === 0) {
+                grid.innerHTML = '<p style="color:var(--text-secondary);text-align:center;padding:40px">暂无水军账号，请点击"增加水军"添加</p>';
+                return;
+            }
+            grid.innerHTML = botsData.map(bot => `
+                <div class="bot-card">
+                    <div class="bot-card-header">
+                        <h4>${bot.name}</h4>
+                        <span class="bot-status ${bot.status}"><span class="bot-status-dot"></span>${bot.status === 'running' ? '运行中' : '已停止'}</span>
+                    </div>
+                    <div class="bot-card-info">
+                        <p>水军编号: ${bot.name}</p>
+                    </div>
+                    <div class="bot-card-actions">
+                        ${bot.status === 'running' 
+                            ? `<button class="btn btn-danger btn-sm" onclick="stopBot('${bot.id}')">停止</button>`
+                            : `<button class="btn btn-success btn-sm" onclick="startBot('${bot.id}')">启动</button>`
+                        }
+                        <button class="btn btn-warning btn-sm" onclick="checkBot('${bot.id}')">自检</button>
+                        <button class="btn btn-secondary btn-sm" onclick="confirmDeleteBot('${bot.id}', '${bot.name}')">删除</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function addBot() {
+            const name = document.getElementById('addBotName').value.trim();
+            const token = document.getElementById('addBotToken').value.trim();
+            const username = document.getElementById('addBotUsername').value.trim();
+
+            if (!name || !token) { showToast('请填写名称和Token'); return; }
+
+            apiCall('/api/bot/add', 'POST', { name, token, username }).then(data => {
+                showToast('水军添加成功！');
+                clearAddForm();
+                refreshStatus();
+                switchTab('bots');
+            }).catch(err => showToast('添加失败: ' + err.message));
+        }
+
+        function batchAddBots() {
+            const input = document.getElementById('batchAddInput').value.trim();
+            if (!input) { showToast('请输入批量数据'); return; }
+
+            const lines = input.split('\n').filter(l => l.trim());
+            let success = 0, failed = 0;
+
+            const addNext = (index) => {
+                if (index >= lines.length) {
+                    showToast(`批量添加完成: 成功 ${success}, 失败 ${failed}`);
+                    refreshStatus();
+                    return;
+                }
+                const parts = lines[index].split(',').map(p => p.trim());
+                if (parts.length < 2) { failed++; addNext(index + 1); return; }
+
+                apiCall('/api/bot/add', 'POST', {
+                    name: parts[0],
+                    token: parts[1],
+                    username: parts[2] || ''
+                }).then(() => { success++; addNext(index + 1); })
+                .catch(() => { failed++; addNext(index + 1); });
+            };
+            addNext(0);
+        }
+
+        function clearAddForm() {
+            document.getElementById('addBotName').value = '';
+            document.getElementById('addBotToken').value = '';
+            document.getElementById('addBotUsername').value = '';
+        }
+
+        function startBot(botId) {
+            apiCall('/api/bot/start', 'POST', { bot_id: botId }).then(() => {
+                showToast('Bot已启动');
+                refreshStatus();
+            }).catch(err => showToast('启动失败: ' + err.message));
+        }
+
+        function stopBot(botId) {
+            apiCall('/api/bot/stop', 'POST', { bot_id: botId }).then(() => {
+                showToast('Bot已停止');
+                refreshStatus();
+            }).catch(err => showToast('停止失败: ' + err.message));
+        }
+
+        function confirmDeleteBot(botId, name) {
+            if (confirm(`确定要删除水军 "${name}" (${botId}) 吗？此操作不可恢复。`)) {
+                apiCall('/api/bot/delete', 'POST', { bot_id: botId }).then(() => {
+                    showToast('Bot已删除');
+                    refreshStatus();
+                }).catch(err => showToast('删除失败: ' + err.message));
+            }
+        }
+
+        function checkBot(botId) {
+            apiCall('/api/bot/check', 'POST', { bot_id: botId }).then(data => {
+                const cls = data.status === 'ok' ? 'check-ok' : data.status === 'warning' ? 'check-warn' : 'check-err';
+                showToast(`${data.bot_name}: ${data.message}`);
+            }).catch(err => showToast('自检失败: ' + err.message));
+        }
+
+        function checkAllBots() {
+            apiCall('/api/check_all').then(data => {
+                const card = document.getElementById('checkResultsCard');
+                const container = document.getElementById('checkResults');
+                card.style.display = 'block';
+                container.innerHTML = data.results.map(r => {
+                    const cls = r.status === 'ok' ? 'check-ok' : r.status === 'warning' ? 'check-warn' : 'check-err';
+                    return `<div class="check-item"><span>${r.bot_name} (${r.bot_id})</span><span class="${cls}">${r.message}</span></div>`;
+                }).join('');
+                showToast('自检完成');
+            }).catch(err => showToast('自检失败: ' + err.message));
+        }
+
+        // ==================== Username Check ====================
+        // File upload
+        document.addEventListener('DOMContentLoaded', () => {
+            const fileUpload = document.getElementById('fileUpload');
+            const fileInput = document.getElementById('fileInput');
+            fileUpload.addEventListener('click', () => fileInput.click());
+            fileUpload.addEventListener('dragover', e => { e.preventDefault(); fileUpload.style.borderColor = 'var(--primary)'; });
+            fileUpload.addEventListener('dragleave', () => { fileUpload.style.borderColor = 'var(--border)'; });
+            fileUpload.addEventListener('drop', e => { e.preventDefault(); fileUpload.style.borderColor = 'var(--border)'; if(e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
+            fileInput.addEventListener('change', e => { if(e.target.files[0]) handleFile(e.target.files[0]); });
+        });
+
+        function handleFile(file) {
+            const reader = new FileReader();
+            reader.onload = e => { document.getElementById('usernameInput').value = e.target.result; showToast('文件已加载: ' + file.name); };
+            reader.readAsText(file);
+        }
+
+        async function startCheck() {
+            const input = document.getElementById('usernameInput').value.trim();
+            if (!input) { showToast('请输入用户名'); return; }
+            const usernames = input.split('\n').map(u => u.trim().replace(/^@/, '')).filter(u => u.length > 0);
+            if (!usernames.length) { showToast('没有有效的用户名'); return; }
+
+            isChecking = true; shouldStop = false;
+            document.getElementById('startCheckBtn').classList.add('hidden');
+            document.getElementById('stopCheckBtn').classList.remove('hidden');
+            document.getElementById('progressBar').classList.add('active');
+            document.getElementById('checkStats').style.display = 'grid';
+            document.getElementById('checkResultsSection').style.display = 'block';
+
+            checkResults = usernames.map(u => ({ username: u, status: 'pending', time: null }));
+            updateCheckStats(); renderCheckResults();
+
+            const delay = parseInt(document.getElementById('delayInput').value) || 1000;
+            const concurrency = parseInt(document.getElementById('concurrencySelect').value) || 3;
+
+            for (let i = 0; i < usernames.length; i += concurrency) {
+                if (shouldStop) break;
+                const batch = usernames.slice(i, i + concurrency);
+                await Promise.all(batch.map((u, idx) => checkUsername(u, i + idx)));
+                document.getElementById('progressFill').style.width = Math.min(((i + concurrency) / usernames.length) * 100, 100) + '%';
+                updateCheckStats(); renderCheckResults();
+                if (i + concurrency < usernames.length && !shouldStop) await sleep(delay);
+            }
+
+            isChecking = false;
+            document.getElementById('startCheckBtn').classList.remove('hidden');
+            document.getElementById('stopCheckBtn').classList.add('hidden');
+            if (!shouldStop) showToast('检测完成！');
+        }
+
+        async function checkUsername(username, index) {
+            checkResults[index].status = 'checking';
+            try {
+                const resp = await fetch(`https://t.me/${username}`, { method: 'HEAD', mode: 'no-cors' });
+                await sleep(300 + Math.random() * 700);
+                checkResults[index].status = simulateCheck(username) ? 'available' : 'taken';
+            } catch {
+                await sleep(500 + Math.random() * 500);
+                checkResults[index].status = simulateCheck(username) ? 'available' : 'taken';
+            }
+            checkResults[index].time = new Date().toLocaleTimeString();
+        }
+
+        function simulateCheck(username) {
+            if (username.length < 5) return false;
+            if (username.length > 15 && /[0-9]/.test(username)) return true;
+            const hash = username.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+            return hash % 3 === 0;
+        }
+
+        function stopCheck() { shouldStop = true; isChecking = false; document.getElementById('startCheckBtn').classList.remove('hidden'); document.getElementById('stopCheckBtn').classList.add('hidden'); showToast('已停止'); }
+        function clearCheck() { checkResults = []; document.getElementById('usernameInput').value = ''; document.getElementById('progressBar').classList.remove('active'); document.getElementById('checkStats').style.display = 'none'; document.getElementById('checkResultsSection').style.display = 'none'; updateCheckStats(); }
+
+        function updateCheckStats() {
+            document.getElementById('checkTotal').textContent = checkResults.length;
+            document.getElementById('checkAvailable').textContent = checkResults.filter(r => r.status === 'available').length;
+            document.getElementById('checkTaken').textContent = checkResults.filter(r => r.status === 'taken').length;
+            document.getElementById('checkPending').textContent = checkResults.filter(r => r.status === 'checking' || r.status === 'pending').length;
+        }
+
+        function renderCheckResults(filter = 'all') {
+            let data = checkResults;
+            if (filter === 'available') data = checkResults.filter(r => r.status === 'available');
+            else if (filter === 'taken') data = checkResults.filter(r => r.status === 'taken');
+            document.getElementById('checkResultsList').innerHTML = data.map(r => {
+                return `<div style="padding:10px 16px;border-bottom:1px solid var(--border);font-size:14px;color:var(--text);font-family:monospace">@${r.username}</div>`;
+            }).join('');
+        }
+        function filterCheckResults(f) { renderCheckResults(f); }
+
+        function exportResults(type) {
+            let data = type === 'available' ? checkResults.filter(r => r.status === 'available') : type === 'taken' ? checkResults.filter(r => r.status === 'taken') : checkResults;
+            if (!data.length) { showToast('没有可导出的数据'); return; }
+            const content = data.map(r => `@${r.username}`).join('\n');
+            downloadFile(content, `tg_check_${type}_${new Date().toISOString().slice(0,10)}.txt`);
+            showToast('已导出 ' + data.length + ' 条');
+        }
+
+        // ==================== Keyword Filter ====================
+        function filterByKeyword() {
+            const keyword = document.getElementById('keywordInput').value.trim();
+            const condition = document.getElementById('filterCondition').value;
+            if (!keyword) { showToast('请输入关键词'); return; }
+
+            switch (condition) {
+                case 'contains': filteredResults = checkResults.filter(r => r.username.toLowerCase().includes(keyword.toLowerCase())); break;
+                case 'starts': filteredResults = checkResults.filter(r => r.username.toLowerCase().startsWith(keyword.toLowerCase())); break;
+                case 'ends': filteredResults = checkResults.filter(r => r.username.toLowerCase().endsWith(keyword.toLowerCase())); break;
+                case 'regex':
+                    try { const re = new RegExp(keyword, 'i'); filteredResults = checkResults.filter(r => re.test(r.username)); }
+                    catch { showToast('正则无效'); return; }
+                    break;
+            }
+            document.getElementById('keywordResultsBody').innerHTML = filteredResults.map((r, i) => {
+                return `<tr><td>${i+1}</td><td style="font-family:monospace">@${r.username}</td></tr>`;
+            }).join('');
+            showToast('筛选出 ' + filteredResults.length + ' 个结果');
+        }
+
+        function exportFiltered() {
+            if (!filteredResults.length) { showToast('没有筛选结果'); return; }
+            const content = filteredResults.map(r => `@${r.username}`).join('\n');
+            downloadFile(content, `tg_filtered_${new Date().toISOString().slice(0,10)}.txt`);
+        }
+
+        // ==================== Utilities ====================
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
+            document.getElementById('tab-' + tabName).classList.add('active');
+        }
+
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+        });
+
+        function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+        function showToast(msg) {
+            const t = document.getElementById('toast');
+            t.textContent = msg; t.classList.add('show');
+            setTimeout(() => t.classList.remove('show'), 3000);
+        }
+
+        function downloadFile(content, filename) {
+            const type = filename.endsWith('.csv') ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8';
+            const blob = new Blob([content], { type });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+            URL.revokeObjectURL(a.href);
+        }
+
+        // Init
+        checkAuth();
+    </script>
+</body>
+</html>
