@@ -623,7 +623,7 @@
             if (!name || !phone) { showToast('请填写编号和手机号'); return; }
             if (!code) { showToast('请填写验证码'); return; }
 
-            apiCall('/api/bot/add', 'POST', { name, phone, code, password }).then(data => {
+            apiCall('/api/bot/verify', 'POST', { name, phone, code, password }).then(data => {
                 showToast('水军添加成功！');
                 clearAddForm();
                 refreshStatus();
