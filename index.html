@@ -336,31 +336,38 @@
         <div class="tab-content" id="tab-add-bot">
             <div class="card">
                 <h3>增加水军账号</h3>
-                <p style="color:var(--text-secondary);font-size:13px;margin-bottom:20px">添加新的 Telegram Bot 到水军池中，添加后将自动启动。</p>
+                <p style="color:var(--text-secondary);font-size:13px;margin-bottom:20px">添加新的 Telegram 水军账号，通过手机号验证后自动登录。</p>
                 
                 <div class="form-group">
-                    <label>Bot 名称 *</label>
-                    <input type="text" id="addBotName" placeholder="例如: 84（编号）">
+                    <label>水军编号 *</label>
+                    <input type="text" id="addBotName" placeholder="例如: 1（自动编号）">
                 </div>
                 <div class="form-group">
-                    <label>Bot Token *</label>
-                    <input type="text" id="addBotToken" placeholder="例如: 123456789:AABBCCDDEEFFGGHHIIJJKKLLMMNNOOPPqqr">
+                    <label>手机号 *</label>
+                    <input type="text" id="addBotPhone" placeholder="例如: +8613800138000（含国际区号）">
                 </div>
-                <div class="form-group">
-                    <label>Bot Username（可选）</label>
-                    <input type="text" id="addBotUsername" placeholder="例如: kuaiyue84Bot">
+                <div style="margin-top:12px;display:flex;gap:12px;align-items:flex-end">
+                    <div class="form-group" style="flex:1;margin-bottom:0">
+                        <label>验证码</label>
+                        <input type="text" id="addBotCode" placeholder="输入收到的验证码">
+                    </div>
+                    <button class="btn btn-warning" id="sendCodeBtn" onclick="sendCode()" style="height:42px;white-space:nowrap">发送验证码</button>
+                </div>
+                <div class="form-group" style="margin-top:12px">
+                    <label>两步验证密码（可选）</label>
+                    <input type="password" id="addBot2FA" placeholder="如果开启了两步验证，请输入密码">
                 </div>
                 
                 <div style="margin-top:20px;display:flex;gap:12px">
-                    <button class="btn btn-primary" onclick="addBot()">添加并启动</button>
+                    <button class="btn btn-primary" onclick="addBot()">验证并添加</button>
                     <button class="btn btn-secondary" onclick="clearAddForm()">清空</button>
                 </div>
 
                 <div style="margin-top:24px;padding-top:24px;border-top:1px solid var(--border)">
                     <h3>批量添加</h3>
-                    <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">每行一个，格式：名称,Token,Username</p>
+                    <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">每行一个，格式：编号,手机号</p>
                     <div class="form-group">
-                        <textarea id="batchAddInput" placeholder="84,8712671220:AAETAhpc_xxxxx,kuaiyue84Bot&#10;85,8812345678:AAFxxxxx,kuaiyue85Bot"></textarea>
+                        <textarea id="batchAddInput" placeholder="1,+8613800138000&#10;2,+8613900139000&#10;3,+8613700137000"></textarea>
                     </div>
                     <button class="btn btn-primary" onclick="batchAddBots()">批量添加</button>
                 </div>
@@ -588,14 +595,42 @@
             `).join('');
         }
 
+        function sendCode() {
+            const phone = document.getElementById('addBotPhone').value.trim();
+            if (!phone) { showToast('请填写手机号'); return; }
+            const btn = document.getElementById('sendCodeBtn');
+            btn.disabled = true;
+            btn.textContent = '发送中...';
+            apiCall('/api/bot/send_code', 'POST', { phone }).then(data => {
+                showToast('验证码已发送，请查看 Telegram');
+                btn.textContent = '已发送';
+                let countdown = 60;
+                const timer = setInterval(() => {
+                    countdown--;
+                    btn.textContent = countdown + 's';
+                    if (countdown <= 0) {
+                        clearInterval(timer);
+                        btn.disabled = false;
+                        btn.textContent = '发送验证码';
+                    }
+                }, 1000);
+            }).catch(err => {
+                showToast('发送失败: ' + err.message);
+                btn.disabled = false;
+                btn.textContent = '发送验证码';
+            });
+        }
+
         function addBot() {
             const name = document.getElementById('addBotName').value.trim();
-            const token = document.getElementById('addBotToken').value.trim();
-            const username = document.getElementById('addBotUsername').value.trim();
+            const phone = document.getElementById('addBotPhone').value.trim();
+            const code = document.getElementById('addBotCode').value.trim();
+            const password = document.getElementById('addBot2FA').value.trim();
 
-            if (!name || !token) { showToast('请填写名称和Token'); return; }
+            if (!name || !phone) { showToast('请填写编号和手机号'); return; }
+            if (!code) { showToast('请填写验证码'); return; }
 
-            apiCall('/api/bot/add', 'POST', { name, token, username }).then(data => {
+            apiCall('/api/bot/add', 'POST', { name, phone, code, password }).then(data => {
                 showToast('水军添加成功！');
                 clearAddForm();
                 refreshStatus();
@@ -612,17 +647,16 @@
 
             const addNext = (index) => {
                 if (index >= lines.length) {
-                    showToast(`批量添加完成: 成功 ${success}, 失败 ${failed}`);
+                    showToast(`批量发送完成: 成功 ${success}, 失败 ${failed}`);
                     refreshStatus();
                     return;
                 }
                 const parts = lines[index].split(',').map(p => p.trim());
                 if (parts.length < 2) { failed++; addNext(index + 1); return; }
 
-                apiCall('/api/bot/add', 'POST', {
+                apiCall('/api/bot/send_code', 'POST', {
                     name: parts[0],
-                    token: parts[1],
-                    username: parts[2] || ''
+                    phone: parts[1]
                 }).then(() => { success++; addNext(index + 1); })
                 .catch(() => { failed++; addNext(index + 1); });
             };
@@ -631,8 +665,9 @@
 
         function clearAddForm() {
             document.getElementById('addBotName').value = '';
-            document.getElementById('addBotToken').value = '';
-            document.getElementById('addBotUsername').value = '';
+            document.getElementById('addBotPhone').value = '';
+            document.getElementById('addBotCode').value = '';
+            document.getElementById('addBot2FA').value = '';
         }
 
         function startBot(botId) {
