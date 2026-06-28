@@ -438,32 +438,25 @@
         <!-- Tab: Keyword -->
         <div class="tab-content" id="tab-keyword">
             <div class="card">
-                <h3>关键词筛选</h3>
-                <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">从检测结果中筛选包含指定关键词的用户名</p>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>关键词</label>
-                        <input type="text" id="keywordInput" placeholder="输入关键词...">
-                    </div>
-                    <div class="form-group">
-                        <label>筛选条件</label>
-                        <select id="filterCondition">
-                            <option value="contains">包含关键词</option>
-                            <option value="starts">以关键词开头</option>
-                            <option value="ends">以关键词结尾</option>
-                            <option value="regex">正则表达式</option>
-                        </select>
+                <h3>关键词过滤</h3>
+                <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">输入关键词直接从检测结果中删除包含该关键词的用户名，并永久记录，下次检测自动过滤</p>
+                <div class="form-group">
+                    <label>添加过滤关键词（空格分隔多个）</label>
+                    <div style="display:flex;gap:12px">
+                        <input type="text" id="keywordInput" placeholder="例如: Bot 代理 主 签证 集团" style="flex:1">
+                        <button class="btn btn-danger" onclick="addBlacklistKeywords()">添加并删除</button>
                     </div>
                 </div>
-                <div style="display:flex;gap:12px">
-                    <button class="btn btn-primary" onclick="filterByKeyword()">筛选</button>
-                    <button class="btn btn-success" onclick="exportFiltered()">导出结果</button>
+                
+                <div style="margin-top:20px">
+                    <h4 style="color:var(--danger);margin-bottom:12px">已保存的过滤关键词</h4>
+                    <div id="blacklistTags" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px"></div>
+                    <button class="btn btn-sm btn-secondary" onclick="clearBlacklist()">清空所有关键词</button>
                 </div>
-                <div class="table-wrapper" style="margin-top:16px">
-                    <table class="results-table">
-                        <thead><tr><th>#</th><th>用户名</th><th>状态</th></tr></thead>
-                        <tbody id="keywordResultsBody"></tbody>
-                    </table>
+
+                <div style="margin-top:20px;padding-top:20px;border-top:1px solid var(--border)">
+                    <h4 style="color:var(--warning);margin-bottom:12px">本次删除的用户名 <span id="deletedCount" style="font-size:13px;color:var(--text-secondary)"></span></h4>
+                    <div class="username-list" id="deletedList" style="max-height:300px;overflow-y:auto;background:var(--bg);border-radius:10px;padding:8px 0;border:1px solid var(--border)"></div>
                 </div>
             </div>
         </div>
@@ -723,6 +716,7 @@
             fileUpload.addEventListener('dragleave', () => { fileUpload.style.borderColor = 'var(--border)'; });
             fileUpload.addEventListener('drop', e => { e.preventDefault(); fileUpload.style.borderColor = 'var(--border)'; if(e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
             fileInput.addEventListener('change', e => { if(e.target.files[0]) handleFile(e.target.files[0]); });
+            renderBlacklistTags();
         });
 
         function handleFile(file) {
@@ -734,8 +728,17 @@
         async function startCheck() {
             const input = document.getElementById('usernameInput').value.trim();
             if (!input) { showToast('请输入用户名'); return; }
-            const usernames = input.split('\n').map(u => u.trim().replace(/^@/, '')).filter(u => u.length > 0);
+            let usernames = input.split('\n').map(u => u.trim().replace(/^@/, '')).filter(u => u.length > 0);
             if (!usernames.length) { showToast('没有有效的用户名'); return; }
+            // 去重
+            usernames = [...new Set(usernames.map(u => u.toLowerCase()))].map(u => usernames.find(orig => orig.toLowerCase() === u));
+            // 应用黑名单过滤
+            const blacklist = getBlacklist();
+            if (blacklist.length) {
+                const before = usernames.length;
+                usernames = usernames.filter(u => !blacklist.some(kw => u.toLowerCase().includes(kw)));
+                if (before > usernames.length) showToast(`已自动过滤 ${before - usernames.length} 个黑名单用户名`);
+            }
 
             isChecking = true; shouldStop = false;
             document.getElementById('startCheckBtn').classList.add('hidden');
@@ -820,42 +823,116 @@
                 if (!resp.ok) throw new Error('File not found');
                 const text = await resp.text();
                 const usernames = text.split('\n').map(u => u.trim().replace(/^@/, '')).filter(u => u.length > 0);
-                checkResults = usernames.map(u => ({ username: u, status: 'available', time: '已恢复' }));
+                let results = usernames.map(u => ({ username: u, status: 'available', time: '已恢复' }));
+                // 应用黑名单过滤
+                results = applyBlacklistFilter(results);
+                // 去重
+                const seen = new Set();
+                results = results.filter(r => {
+                    const lower = r.username.toLowerCase();
+                    if (seen.has(lower)) return false;
+                    seen.add(lower);
+                    return true;
+                });
+                checkResults = results;
                 document.getElementById('checkStats').style.display = 'grid';
                 document.getElementById('checkResultsSection').style.display = 'block';
                 updateCheckStats();
                 renderCheckResults();
-                showToast('已恢复 ' + usernames.length + ' 条可用用户名数据');
+                const filtered = usernames.length - results.length;
+                showToast(`已恢复 ${results.length} 条可用用户名数据` + (filtered > 0 ? `（过滤了 ${filtered} 个）` : ''));
             } catch(e) {
                 showToast('恢复失败: ' + e.message);
             }
         }
 
         // ==================== Keyword Filter ====================
-        function filterByKeyword() {
-            const keyword = document.getElementById('keywordInput').value.trim();
-            const condition = document.getElementById('filterCondition').value;
-            if (!keyword) { showToast('请输入关键词'); return; }
-
-            switch (condition) {
-                case 'contains': filteredResults = checkResults.filter(r => r.username.toLowerCase().includes(keyword.toLowerCase())); break;
-                case 'starts': filteredResults = checkResults.filter(r => r.username.toLowerCase().startsWith(keyword.toLowerCase())); break;
-                case 'ends': filteredResults = checkResults.filter(r => r.username.toLowerCase().endsWith(keyword.toLowerCase())); break;
-                case 'regex':
-                    try { const re = new RegExp(keyword, 'i'); filteredResults = checkResults.filter(r => re.test(r.username)); }
-                    catch { showToast('正则无效'); return; }
-                    break;
-            }
-            document.getElementById('keywordResultsBody').innerHTML = filteredResults.map((r, i) => {
-                return `<tr><td>${i+1}</td><td style="font-family:monospace">@${r.username}</td></tr>`;
-            }).join('');
-            showToast('筛选出 ' + filteredResults.length + ' 个结果');
+        // ==================== 黑名单关键词过滤 ====================
+        function getBlacklist() {
+            return JSON.parse(localStorage.getItem('tg_blacklist_keywords') || '[]');
         }
-
-        function exportFiltered() {
-            if (!filteredResults.length) { showToast('没有筛选结果'); return; }
-            const content = filteredResults.map(r => `@${r.username}`).join('\n');
-            downloadFile(content, `tg_filtered_${new Date().toISOString().slice(0,10)}.txt`);
+        function saveBlacklist(list) {
+            localStorage.setItem('tg_blacklist_keywords', JSON.stringify(list));
+        }
+        function renderBlacklistTags() {
+            const list = getBlacklist();
+            const container = document.getElementById('blacklistTags');
+            if (!list.length) {
+                container.innerHTML = '<span style="color:var(--text-secondary);font-size:13px">暂无过滤关键词</span>';
+                return;
+            }
+            container.innerHTML = list.map(kw => 
+                `<span style="background:var(--danger);color:#fff;padding:4px 10px;border-radius:12px;font-size:12px;display:inline-flex;align-items:center;gap:4px">${kw}<span onclick="removeBlacklistKeyword('${kw}')" style="cursor:pointer;font-weight:bold;margin-left:4px">&times;</span></span>`
+            ).join('');
+        }
+        function addBlacklistKeywords() {
+            const input = document.getElementById('keywordInput').value.trim();
+            if (!input) { showToast('请输入关键词'); return; }
+            const keywords = input.split(/\s+/).filter(k => k.length > 0);
+            const list = getBlacklist();
+            let added = 0;
+            keywords.forEach(kw => {
+                if (!list.includes(kw.toLowerCase())) {
+                    list.push(kw.toLowerCase());
+                    added++;
+                }
+            });
+            saveBlacklist(list);
+            // 从检测结果中删除包含这些关键词的用户名
+            const before = checkResults.length;
+            const deleted = checkResults.filter(r => matchesBlacklist(r.username, keywords.map(k => k.toLowerCase())));
+            checkResults = checkResults.filter(r => !matchesBlacklist(r.username, keywords.map(k => k.toLowerCase())));
+            const removedCount = before - checkResults.length;
+            // 显示删除的用户名
+            document.getElementById('deletedCount').textContent = `(共 ${removedCount} 个)`;
+            document.getElementById('deletedList').innerHTML = deleted.map(r => 
+                `<div style="padding:6px 16px;border-bottom:1px solid var(--border);font-family:monospace;font-size:13px;color:var(--danger)">@${r.username}</div>`
+            ).join('') || '<div style="padding:16px;text-align:center;color:var(--text-secondary)">无匹配结果</div>';
+            // 更新统计和显示
+            updateCheckStats();
+            renderCheckResults();
+            renderBlacklistTags();
+            document.getElementById('keywordInput').value = '';
+            showToast(`已添加 ${added} 个关键词，删除 ${removedCount} 个用户名`);
+        }
+        function matchesBlacklist(username, keywords) {
+            const lower = username.toLowerCase();
+            return keywords.some(kw => lower.includes(kw));
+        }
+        function removeBlacklistKeyword(kw) {
+            let list = getBlacklist();
+            list = list.filter(k => k !== kw);
+            saveBlacklist(list);
+            renderBlacklistTags();
+            showToast(`已移除关键词: ${kw}`);
+        }
+        function clearBlacklist() {
+            saveBlacklist([]);
+            renderBlacklistTags();
+            showToast('已清空所有过滤关键词');
+        }
+        function applyBlacklistFilter(results) {
+            const list = getBlacklist();
+            if (!list.length) return results;
+            return results.filter(r => !matchesBlacklist(r.username, list));
+        }
+        function getSeenUsernames() {
+            return JSON.parse(localStorage.getItem('tg_seen_usernames') || '[]');
+        }
+        function saveSeenUsernames(list) {
+            localStorage.setItem('tg_seen_usernames', JSON.stringify(list));
+        }
+        function deduplicateResults(results) {
+            const seen = new Set(getSeenUsernames());
+            const unique = [];
+            results.forEach(r => {
+                if (!seen.has(r.username.toLowerCase())) {
+                    seen.add(r.username.toLowerCase());
+                    unique.push(r);
+                }
+            });
+            saveSeenUsernames([...seen]);
+            return unique;
         }
 
         // ==================== Utilities ====================
