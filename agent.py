@@ -18,7 +18,7 @@ app = Flask(__name__)
 # ============ 配置 ============
 AUTH_KEY = "fe570f573d2840308f6a298daa3ad4a0"
 LOGIN_USER = "admin"
-LOGIN_PASS = "Ab23456987"
+LOGIN_PASS = "Ab123456987"
 CONFIG_FILE = "/root/bot_agent/config.json"
 BLACKLIST_FILE = "/root/bot_agent/blacklist.json"
 AVAILABLE_FILE = "/root/bot_agent/available_usernames.json"
@@ -143,14 +143,20 @@ def api_bot_remove():
 # ============ Telethon 手机号登录（异步） ============
 pending_clients = {}
 
-def get_api_config():
+def get_api_config(api_id=None, api_hash=None):
+    """获取 API 配置。优先使用传入的自定义 api_id/api_hash，否则随机从系统配置中选取。"""
+    if api_id and api_hash:
+        try:
+            return {"api_id": int(api_id), "api_hash": str(api_hash).strip()}
+        except (ValueError, TypeError):
+            pass
     return random.choice(API_CONFIGS)
 
-async def async_send_code(phone):
-    """异步发送验证码"""
+async def async_send_code(phone, api_id=None, api_hash=None):
+    """异步发送验证码。支持自定义 api_id / api_hash。"""
     from telethon import TelegramClient
     
-    api_config = get_api_config()
+    api_config = get_api_config(api_id, api_hash)
     api_id = api_config["api_id"]
     api_hash = api_config["api_hash"]
     
@@ -213,14 +219,18 @@ async def async_verify_code(phone, code, password=None):
 @app.route('/api/bot/send_code', methods=['POST'])
 @require_auth
 def api_send_code():
-    """发送验证码到手机号"""
-    data = request.json
+    """发送验证码到手机号。支持自定义 api_id / api_hash。"""
+    data = request.json or {}
     phone = data.get('phone', '').strip()
     if not phone:
         return jsonify({"error": "请提供手机号"}), 400
     
+    # 支持前端传入自定义 API 配置
+    api_id = data.get('api_id') or data.get('apiId')
+    api_hash = data.get('api_hash') or data.get('apiHash')
+    
     try:
-        result = run_async(async_send_code(phone))
+        result = run_async(async_send_code(phone, api_id=api_id, api_hash=api_hash))
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": f"发送验证码失败: {str(e)}"}), 400
