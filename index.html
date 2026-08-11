@@ -437,16 +437,19 @@
                 <div class="stat-card"><div class="number" id="checkTotal" style="color:var(--primary)">0</div><div class="label">总计</div></div>
                 <div class="stat-card"><div class="number" id="checkAvailable" style="color:var(--success)">0</div><div class="label">可用</div></div>
                 <div class="stat-card"><div class="number" id="checkTaken" style="color:var(--danger)">0</div><div class="label">已占用</div></div>
+                <div class="stat-card"><div class="number" id="checkDeleted" style="color:#9c27b0">0</div><div class="label">已删除</div></div>
                 <div class="stat-card"><div class="number" id="checkPending" style="color:var(--warning)">0</div><div class="label">检测中</div></div>
             </div>
 
             <div class="card" id="checkResultsSection" style="display:none">
                 <h3>检测结果</h3>
-                <div style="margin-bottom:12px;display:flex;gap:8px">
+                <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('all')">全部</button>
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('available')">可用</button>
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('taken')">已占用</button>
+                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('deleted')">已删除</button>
                 </div>
+                <p style="color:var(--text-secondary);font-size:12px;margin-bottom:8px;">提示：已删除账号不会写入有用文档</p>
                 <div class="username-list" id="checkResultsList" style="max-height:500px;overflow-y:auto;background:var(--bg);border-radius:10px;padding:8px 0;border:1px solid var(--border)"></div>
             </div>
         </div>
@@ -805,21 +808,14 @@
         async function checkUsername(username, index) {
             checkResults[index].status = 'checking';
             try {
-                const resp = await fetch(`https://t.me/${username}`, { method: 'HEAD', mode: 'no-cors' });
-                await sleep(300 + Math.random() * 700);
-                checkResults[index].status = simulateCheck(username) ? 'available' : 'taken';
-            } catch {
-                await sleep(500 + Math.random() * 500);
-                checkResults[index].status = simulateCheck(username) ? 'available' : 'taken';
+                const data = await apiCall('/api/check/one', 'POST', { username });
+                checkResults[index].status = data.status || 'error';
+                if (data.error) checkResults[index].error = data.error;
+            } catch (err) {
+                checkResults[index].status = 'error';
+                checkResults[index].error = err.message || '检测失败';
             }
             checkResults[index].time = new Date().toLocaleTimeString();
-        }
-
-        function simulateCheck(username) {
-            if (username.length < 5) return false;
-            if (username.length > 15 && /[0-9]/.test(username)) return true;
-            const hash = username.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-            return hash % 3 === 0;
         }
 
         function stopCheck() { shouldStop = true; isChecking = false; document.getElementById('startCheckBtn').classList.remove('hidden'); document.getElementById('stopCheckBtn').classList.add('hidden'); showToast('已停止'); }
@@ -829,25 +825,54 @@
             document.getElementById('checkTotal').textContent = checkResults.length;
             document.getElementById('checkAvailable').textContent = checkResults.filter(r => r.status === 'available').length;
             document.getElementById('checkTaken').textContent = checkResults.filter(r => r.status === 'taken').length;
+            const deletedEl = document.getElementById('checkDeleted');
+            if (deletedEl) deletedEl.textContent = checkResults.filter(r => r.status === 'deleted').length;
             document.getElementById('checkPending').textContent = checkResults.filter(r => r.status === 'checking' || r.status === 'pending').length;
+        }
+
+        function statusLabel(status) {
+            const map = {
+                available: { text: '可用', color: 'var(--success)' },
+                taken: { text: '已占用', color: 'var(--danger)' },
+                deleted: { text: '已删除', color: '#9c27b0' },
+                invalid: { text: '无效', color: 'var(--warning)' },
+                error: { text: '错误', color: 'var(--text-secondary)' },
+                checking: { text: '检测中', color: 'var(--warning)' },
+                pending: { text: '等待', color: 'var(--text-secondary)' }
+            };
+            return map[status] || { text: status, color: 'var(--text)' };
         }
 
         function renderCheckResults(filter = 'all') {
             let data = checkResults;
             if (filter === 'available') data = checkResults.filter(r => r.status === 'available');
             else if (filter === 'taken') data = checkResults.filter(r => r.status === 'taken');
+            else if (filter === 'deleted') data = checkResults.filter(r => r.status === 'deleted');
             document.getElementById('checkResultsList').innerHTML = data.map(r => {
-                return `<div style="padding:10px 16px;border-bottom:1px solid var(--border);font-size:14px;color:var(--text);font-family:monospace">@${r.username}</div>`;
+                const s = statusLabel(r.status);
+                return `<div style="padding:10px 16px;border-bottom:1px solid var(--border);font-size:14px;display:flex;justify-content:space-between;align-items:center">
+                    <span style="font-family:monospace;color:var(--text)">@${r.username}</span>
+                    <span style="color:${s.color};font-size:12px;font-weight:600">${s.text}</span>
+                </div>`;
             }).join('');
         }
         function filterCheckResults(f) { renderCheckResults(f); }
 
         function exportResults(type) {
-            let data = type === 'available' ? checkResults.filter(r => r.status === 'available') : type === 'taken' ? checkResults.filter(r => r.status === 'taken') : checkResults;
+            let data;
+            if (type === 'available') {
+                data = checkResults.filter(r => r.status === 'available');
+            } else if (type === 'taken') {
+                data = checkResults.filter(r => r.status === 'taken');
+            } else if (type === 'deleted') {
+                data = checkResults.filter(r => r.status === 'deleted');
+            } else {
+                data = checkResults;
+            }
             if (!data.length) { showToast('没有可导出的数据'); return; }
             const content = data.map(r => `@${r.username}`).join('\n');
             downloadFile(content, `tg_check_${type}_${new Date().toISOString().slice(0,10)}.txt`);
-            showToast('已导出 ' + data.length + ' 条');
+            showToast('已导出 ' + data.length + ' 条' + (type === 'available' ? '（仅可用，不含已删除）' : ''));
         }
 
         async function restoreData() {

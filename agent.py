@@ -282,55 +282,190 @@ def api_verify_code():
     except Exception as e:
         return jsonify({"error": f"验证失败: {str(e)}"}), 400
 
-# ============ 批量检测接口 ============
+# ============ 批量检测接口（真实 Telegram 查询） ============
+
+async def async_check_one_username(client, username):
+    """真实检测单个用户名：available / taken / deleted / invalid / error"""
+    from telethon.tl.functions.contacts import ResolveUsernameRequest
+    from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError, FloodWaitError
+    try:
+        result = await client(ResolveUsernameRequest(username))
+        users = getattr(result, 'users', None) or []
+        if users:
+            user = users[0]
+            if getattr(user, 'deleted', False):
+                return {"username": username, "status": "deleted"}
+            return {"username": username, "status": "taken"}
+        chats = getattr(result, 'chats', None) or []
+        if chats:
+            return {"username": username, "status": "taken"}
+        return {"username": username, "status": "taken"}
+    except UsernameNotOccupiedError:
+        return {"username": username, "status": "available"}
+    except UsernameInvalidError:
+        return {"username": username, "status": "invalid"}
+    except FloodWaitError as e:
+        return {"username": username, "status": "error", "error": f"FloodWait {e.seconds}s"}
+    except Exception as e:
+        err = str(e)
+        if "No user has" in err or "USERNAME_NOT_OCCUPIED" in err:
+            return {"username": username, "status": "available"}
+        if "USERNAME_INVALID" in err:
+            return {"username": username, "status": "invalid"}
+        return {"username": username, "status": "error", "error": err[:120]}
+
+async def async_check_usernames_batch(usernames, bot_sessions):
+    """使用已登录水军轮流检测用户名"""
+    from telethon import TelegramClient
+    results = []
+    if not bot_sessions:
+        for u in usernames:
+            results.append({"username": u, "status": "error", "error": "无可用水军账号"})
+        return results
+
+    clients = []
+    try:
+        for sess in bot_sessions:
+            try:
+                client = TelegramClient(
+                    sess["session_path"],
+                    int(sess["api_id"]),
+                    sess["api_hash"],
+                    loop=_loop
+                )
+                await client.connect()
+                if await client.is_user_authorized():
+                    clients.append(client)
+                else:
+                    await client.disconnect()
+            except Exception:
+                continue
+
+        if not clients:
+            for u in usernames:
+                results.append({"username": u, "status": "error", "error": "水军未授权或session失效"})
+            return results
+
+        for i, username in enumerate(usernames):
+            client = clients[i % len(clients)]
+            r = await async_check_one_username(client, username)
+            results.append(r)
+            await asyncio.sleep(0.35 + random.random() * 0.4)
+
+        return results
+    finally:
+        for c in clients:
+            try:
+                await c.disconnect()
+            except Exception:
+                pass
+
 @app.route('/api/check', methods=['POST'])
 @require_auth
 def api_check_usernames():
-    data = request.json
+    """真实批量检测用户名（available / taken / deleted / invalid）"""
+    data = request.json or {}
     usernames = data.get('usernames', [])
     if not usernames:
         return jsonify({"error": "请提供用户名列表"}), 400
-    
-    results = []
-    available = load_available()
+
+    cleaned = []
+    seen = set()
     blacklist = load_blacklist()
-    
-    for username in usernames:
-        username = username.strip().lstrip('@')
-        if not username:
+    for u in usernames:
+        u = u.strip().lstrip('@')
+        if not u or u.lower() in seen:
             continue
-        is_blacklisted = any(kw.lower() in username.lower() for kw in blacklist)
-        if is_blacklisted:
+        if any(kw.lower() in u.lower() for kw in blacklist):
             continue
-        if f"@{username}" not in available:
-            results.append({"username": username, "status": "pending"})
-    
-    return jsonify({"results": results, "total": len(results)})
+        seen.add(u.lower())
+        cleaned.append(u)
+
+    if not cleaned:
+        return jsonify({"results": [], "total": 0})
+
+    config = load_config()
+    bot_sessions = []
+    for bot in config.get('bots', []):
+        if bot.get('session_path'):
+            bot_sessions.append({
+                "session_path": bot["session_path"],
+                "api_id": bot.get("api_id") or API_CONFIGS[0]["api_id"],
+                "api_hash": bot.get("api_hash") or API_CONFIGS[0]["api_hash"],
+            })
+
+    try:
+        results = run_async(async_check_usernames_batch(cleaned, bot_sessions))
+        return jsonify({"results": results, "total": len(results)})
+    except Exception as e:
+        return jsonify({"error": f"检测失败: {str(e)}"}), 500
+
+@app.route('/api/check/one', methods=['POST'])
+@require_auth
+def api_check_one():
+    """检测单个用户名"""
+    data = request.json or {}
+    username = (data.get('username') or '').strip().lstrip('@')
+    if not username:
+        return jsonify({"error": "请提供用户名"}), 400
+
+    config = load_config()
+    bot_sessions = []
+    for bot in config.get('bots', []):
+        if bot.get('session_path'):
+            bot_sessions.append({
+                "session_path": bot["session_path"],
+                "api_id": bot.get("api_id") or API_CONFIGS[0]["api_id"],
+                "api_hash": bot.get("api_hash") or API_CONFIGS[0]["api_hash"],
+            })
+            break
+
+    try:
+        results = run_async(async_check_usernames_batch([username], bot_sessions))
+        return jsonify(results[0] if results else {"username": username, "status": "error"})
+    except Exception as e:
+        return jsonify({"username": username, "status": "error", "error": str(e)}), 500
 
 @app.route('/api/check/result', methods=['POST'])
 @require_auth
 def api_check_result():
-    data = request.json
-    usernames = data.get('available', [])
+    """只允许 available 写入有用文档，deleted 一律拒绝"""
+    data = request.json or {}
+    items = data.get('available', data.get('results', []))
     
     available = load_available()
     blacklist = load_blacklist()
     added = 0
-    
-    for username in usernames:
-        username = username.strip().lstrip('@')
+    skipped_deleted = 0
+
+    for item in items:
+        if isinstance(item, dict):
+            username = (item.get('username') or '').strip().lstrip('@')
+            status = item.get('status', 'available')
+            if status == 'deleted':
+                skipped_deleted += 1
+                continue
+            if status != 'available':
+                continue
+        else:
+            username = str(item).strip().lstrip('@')
+
         if not username:
             continue
         formatted = f"@{username}"
-        is_blacklisted = any(kw.lower() in username.lower() for kw in blacklist)
-        if is_blacklisted:
+        if any(kw.lower() in username.lower() for kw in blacklist):
             continue
         if formatted not in available:
             available.append(formatted)
             added += 1
-    
+
     save_available(available)
-    return jsonify({"success": True, "added": added, "total": len(available)})
+    return jsonify({
+        "success": True,
+        "added": added,
+        "skipped_deleted": skipped_deleted,
+        "total": len(available)
+    })
 
 @app.route('/api/available', methods=['GET'])
 @require_auth
