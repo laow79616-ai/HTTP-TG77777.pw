@@ -22,6 +22,7 @@ LOGIN_PASS = "Ab123456987"
 CONFIG_FILE = "/root/bot_agent/config.json"
 BLACKLIST_FILE = "/root/bot_agent/blacklist.json"
 AVAILABLE_FILE = "/root/bot_agent/available_usernames.json"
+PREMIUM_FILE = "/root/bot_agent/premium_usernames.json"
 SESSIONS_DIR = "/root/bot_agent/sessions"
 
 # Telethon API 配置（多组轮换）
@@ -88,6 +89,16 @@ def load_available():
 
 def save_available(usernames):
     with open(AVAILABLE_FILE, 'w') as f:
+        json.dump(usernames, f, ensure_ascii=False, indent=2)
+
+def load_premium():
+    if os.path.exists(PREMIUM_FILE):
+        with open(PREMIUM_FILE, 'r') as f:
+            return json.load(f)
+    return []
+
+def save_premium(usernames):
+    with open(PREMIUM_FILE, 'w') as f:
         json.dump(usernames, f, ensure_ascii=False, indent=2)
 
 # ============ 认证中间件 ============
@@ -294,25 +305,32 @@ async def async_check_one_username(client, username):
         if users:
             user = users[0]
             if getattr(user, 'deleted', False):
-                return {"username": username, "status": "deleted"}
-            return {"username": username, "status": "taken"}
+                return {"username": username, "status": "deleted", "premium": False}
+            is_premium = bool(getattr(user, 'premium', False))
+            return {
+                "username": username,
+                "status": "taken",
+                "premium": is_premium,
+                "user_id": getattr(user, 'id', None),
+                "first_name": getattr(user, 'first_name', '') or '',
+            }
         chats = getattr(result, 'chats', None) or []
         if chats:
-            return {"username": username, "status": "taken"}
-        return {"username": username, "status": "taken"}
+            return {"username": username, "status": "taken", "premium": False}
+        return {"username": username, "status": "taken", "premium": False}
     except UsernameNotOccupiedError:
-        return {"username": username, "status": "available"}
+        return {"username": username, "status": "available", "premium": False}
     except UsernameInvalidError:
-        return {"username": username, "status": "invalid"}
+        return {"username": username, "status": "invalid", "premium": False}
     except FloodWaitError as e:
-        return {"username": username, "status": "error", "error": f"FloodWait {e.seconds}s"}
+        return {"username": username, "status": "error", "error": f"FloodWait {e.seconds}s", "premium": False}
     except Exception as e:
         err = str(e)
         if "No user has" in err or "USERNAME_NOT_OCCUPIED" in err:
-            return {"username": username, "status": "available"}
+            return {"username": username, "status": "available", "premium": False}
         if "USERNAME_INVALID" in err:
-            return {"username": username, "status": "invalid"}
-        return {"username": username, "status": "error", "error": err[:120]}
+            return {"username": username, "status": "invalid", "premium": False}
+        return {"username": username, "status": "error", "error": err[:120], "premium": False}
 
 async def async_check_usernames_batch(usernames, bot_sessions):
     """使用已登录水军轮流检测用户名"""
@@ -486,6 +504,51 @@ def api_export_available():
     text = "\n".join(available)
     return text, 200, {'Content-Type': 'text/plain; charset=utf-8'}
 
+
+# ============ Telegram 会员（Premium）采集接口 ============
+@app.route('/api/premium', methods=['GET'])
+@require_auth
+def api_get_premium():
+    premium = load_premium()
+    return jsonify({"usernames": premium, "total": len(premium)})
+
+@app.route('/api/premium/clear', methods=['POST'])
+@require_auth
+def api_clear_premium():
+    save_premium([])
+    return jsonify({"success": True, "message": "已清空会员列表"})
+
+@app.route('/api/premium/export', methods=['GET'])
+@require_auth
+def api_export_premium():
+    premium = load_premium()
+    text = "\n".join(premium)
+    return text, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+
+@app.route('/api/premium/result', methods=['POST'])
+@require_auth
+def api_premium_result():
+    """将 Premium 会员写入会员文档"""
+    data = request.json or {}
+    items = data.get('premium', data.get('results', data.get('usernames', [])))
+    premium = load_premium()
+    added = 0
+    for item in items:
+        if isinstance(item, dict):
+            if not item.get('premium'):
+                continue
+            username = (item.get('username') or '').strip().lstrip('@')
+        else:
+            username = str(item).strip().lstrip('@')
+        if not username:
+            continue
+        formatted = f"@{username}"
+        if formatted not in premium:
+            premium.append(formatted)
+            added += 1
+    save_premium(premium)
+    return jsonify({"success": True, "added": added, "total": len(premium)})
+
 # ============ 恢复数据接口 ============
 @app.route('/api/restore', methods=['POST'])
 @require_auth
@@ -604,12 +667,14 @@ def api_status():
 def api_stats():
     config = load_config()
     available = load_available()
+    premium = load_premium()
     blacklist = load_blacklist()
     bots = config.get('bots', [])
     stats = config.get('stats', {})
     return jsonify({
         "bots": len(bots),
         "available": len(available),
+        "premium": len(premium),
         "blacklist": len(blacklist),
         "stats": {
             "today_sent": stats.get("today_sent", 0),

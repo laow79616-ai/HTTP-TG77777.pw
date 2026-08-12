@@ -267,6 +267,7 @@
             <div class="tab" data-tab="bots">水军管理</div>
             <div class="tab" data-tab="add-bot">增加水军</div>
             <div class="tab" data-tab="check">批量检测</div>
+            <div class="tab" data-tab="premium">会员采集</div>
             <div class="tab" data-tab="keyword">关键词筛选</div>
         </div>
 
@@ -427,6 +428,8 @@
                     <button class="btn btn-secondary" onclick="clearCheck()">清空</button>
                     <button class="btn btn-success" onclick="exportResults('all')">导出全部</button>
                     <button class="btn btn-secondary" onclick="exportResults('available')">导出可用</button>
+                    <button class="btn btn-secondary" onclick="exportResults('premium')">导出会员</button>
+                    <button class="btn btn-primary" onclick="savePremiumFromCheck()">写入会员文档</button>
                     <button class="btn btn-warning" onclick="restoreData()">恢复数据</button>
                 </div>
             </div>
@@ -437,6 +440,7 @@
                 <div class="stat-card"><div class="number" id="checkTotal" style="color:var(--primary)">0</div><div class="label">总计</div></div>
                 <div class="stat-card"><div class="number" id="checkAvailable" style="color:var(--success)">0</div><div class="label">可用</div></div>
                 <div class="stat-card"><div class="number" id="checkTaken" style="color:var(--danger)">0</div><div class="label">已占用</div></div>
+                <div class="stat-card"><div class="number" id="checkPremium" style="color:#ffc107">0</div><div class="label">会员</div></div>
                 <div class="stat-card"><div class="number" id="checkDeleted" style="color:#9c27b0">0</div><div class="label">已删除</div></div>
                 <div class="stat-card"><div class="number" id="checkPending" style="color:var(--warning)">0</div><div class="label">检测中</div></div>
             </div>
@@ -447,10 +451,46 @@
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('all')">全部</button>
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('available')">可用</button>
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('taken')">已占用</button>
+                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('premium')">会员</button>
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('deleted')">已删除</button>
                 </div>
                 <p style="color:var(--text-secondary);font-size:12px;margin-bottom:8px;">提示：已删除账号不会写入有用文档</p>
                 <div class="username-list" id="checkResultsList" style="max-height:500px;overflow-y:auto;background:var(--bg);border-radius:10px;padding:8px 0;border:1px solid var(--border)"></div>
+            </div>
+        </div>
+
+        <!-- Tab: Premium Scan -->
+        <div class="tab-content" id="tab-premium">
+            <div class="card">
+                <h3>Telegram 会员采集</h3>
+                <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">
+                    独立功能：只采集已开通 Telegram Premium 的账号，与「批量检测」互不影响。
+                </p>
+                <div class="form-group">
+                    <label>用户名列表（每行一个）</label>
+                    <textarea id="premiumInput" placeholder="user1&#10;user2&#10;@user3" style="min-height:140px"></textarea>
+                </div>
+                <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px">
+                    <button class="btn btn-primary" id="startPremiumBtn" onclick="startPremiumScan()">开始采集会员</button>
+                    <button class="btn btn-danger hidden" id="stopPremiumBtn" onclick="stopPremiumScan()">停止</button>
+                    <button class="btn btn-secondary" onclick="exportPremiumList()">导出会员文档</button>
+                    <button class="btn btn-warning" onclick="clearPremiumList()">清空会员文档</button>
+                    <button class="btn btn-secondary" onclick="loadPremiumList()">刷新已存会员</button>
+                </div>
+                <div class="progress-bar" id="premiumProgressBar"><div class="fill" id="premiumProgressFill"></div></div>
+                <div class="stats" id="premiumStats" style="display:none;margin-top:12px">
+                    <div class="stat-card"><div class="number" id="premiumScanTotal" style="color:var(--primary)">0</div><div class="label">扫描总数</div></div>
+                    <div class="stat-card"><div class="number" id="premiumScanHit" style="color:#ffc107">0</div><div class="label">发现会员</div></div>
+                    <div class="stat-card"><div class="number" id="premiumStored" style="color:var(--success)">0</div><div class="label">文档已存</div></div>
+                </div>
+                <div class="card" id="premiumResultsSection" style="display:none;margin-top:16px">
+                    <h3>本次发现的会员</h3>
+                    <div class="username-list" id="premiumResultsList" style="max-height:400px;overflow-y:auto;background:var(--bg);border-radius:10px;padding:8px 0;border:1px solid var(--border)"></div>
+                </div>
+                <div class="card" style="margin-top:16px">
+                    <h3>已存会员文档 <span id="premiumDocCount" style="font-size:13px;color:var(--text-secondary)"></span></h3>
+                    <div class="username-list" id="premiumDocList" style="max-height:300px;overflow-y:auto;background:var(--bg);border-radius:10px;padding:8px 0;border:1px solid var(--border)"></div>
+                </div>
             </div>
         </div>
 
@@ -810,7 +850,9 @@
             try {
                 const data = await apiCall('/api/check/one', 'POST', { username });
                 checkResults[index].status = data.status || 'error';
+                checkResults[index].premium = !!data.premium;
                 if (data.error) checkResults[index].error = data.error;
+                if (data.first_name) checkResults[index].first_name = data.first_name;
             } catch (err) {
                 checkResults[index].status = 'error';
                 checkResults[index].error = err.message || '检测失败';
@@ -825,12 +867,17 @@
             document.getElementById('checkTotal').textContent = checkResults.length;
             document.getElementById('checkAvailable').textContent = checkResults.filter(r => r.status === 'available').length;
             document.getElementById('checkTaken').textContent = checkResults.filter(r => r.status === 'taken').length;
+            const premiumEl = document.getElementById('checkPremium');
+            if (premiumEl) premiumEl.textContent = checkResults.filter(r => r.premium && r.status === 'taken').length;
             const deletedEl = document.getElementById('checkDeleted');
             if (deletedEl) deletedEl.textContent = checkResults.filter(r => r.status === 'deleted').length;
             document.getElementById('checkPending').textContent = checkResults.filter(r => r.status === 'checking' || r.status === 'pending').length;
         }
 
-        function statusLabel(status) {
+        function statusLabel(status, premium) {
+            if (premium && status === 'taken') {
+                return { text: '会员', color: '#ffc107' };
+            }
             const map = {
                 available: { text: '可用', color: 'var(--success)' },
                 taken: { text: '已占用', color: 'var(--danger)' },
@@ -847,11 +894,12 @@
             let data = checkResults;
             if (filter === 'available') data = checkResults.filter(r => r.status === 'available');
             else if (filter === 'taken') data = checkResults.filter(r => r.status === 'taken');
+            else if (filter === 'premium') data = checkResults.filter(r => r.premium && r.status === 'taken');
             else if (filter === 'deleted') data = checkResults.filter(r => r.status === 'deleted');
             document.getElementById('checkResultsList').innerHTML = data.map(r => {
-                const s = statusLabel(r.status);
+                const s = statusLabel(r.status, r.premium);
                 return `<div style="padding:10px 16px;border-bottom:1px solid var(--border);font-size:14px;display:flex;justify-content:space-between;align-items:center">
-                    <span style="font-family:monospace;color:var(--text)">@${r.username}</span>
+                    <span style="font-family:monospace;color:var(--text)">@${r.username}${r.premium ? ' ⭐' : ''}</span>
                     <span style="color:${s.color};font-size:12px;font-weight:600">${s.text}</span>
                 </div>`;
             }).join('');
@@ -864,6 +912,8 @@
                 data = checkResults.filter(r => r.status === 'available');
             } else if (type === 'taken') {
                 data = checkResults.filter(r => r.status === 'taken');
+            } else if (type === 'premium') {
+                data = checkResults.filter(r => r.premium && r.status === 'taken');
             } else if (type === 'deleted') {
                 data = checkResults.filter(r => r.status === 'deleted');
             } else {
@@ -872,7 +922,18 @@
             if (!data.length) { showToast('没有可导出的数据'); return; }
             const content = data.map(r => `@${r.username}`).join('\n');
             downloadFile(content, `tg_check_${type}_${new Date().toISOString().slice(0,10)}.txt`);
-            showToast('已导出 ' + data.length + ' 条' + (type === 'available' ? '（仅可用，不含已删除）' : ''));
+            showToast('已导出 ' + data.length + ' 条' + (type === 'available' ? '（仅可用）' : type === 'premium' ? '（仅会员）' : ''));
+        }
+
+        async function savePremiumFromCheck() {
+            const premiumHits = checkResults.filter(r => r.premium && r.status === 'taken');
+            if (!premiumHits.length) { showToast('当前结果中没有会员'); return; }
+            try {
+                const data = await apiCall('/api/premium/result', 'POST', { premium: premiumHits });
+                showToast('已写入会员文档 ' + data.added + ' 条，文档共 ' + data.total + ' 条');
+            } catch (err) {
+                showToast('写入失败: ' + err.message);
+            }
         }
 
         async function restoreData() {
@@ -994,12 +1055,122 @@
             return unique;
         }
 
+
+        // ==================== 独立会员采集 ====================
+        let premiumResults = [];
+        let isPremiumScanning = false;
+        let shouldStopPremium = false;
+
+        async function startPremiumScan() {
+            const input = document.getElementById('premiumInput').value.trim();
+            if (!input) { showToast('请输入用户名'); return; }
+            let usernames = input.split('\n').map(u => u.trim().replace(/^@/, '')).filter(u => u.length > 0);
+            usernames = [...new Set(usernames.map(u => u.toLowerCase()))].map(u => usernames.find(orig => orig.toLowerCase() === u));
+            if (!usernames.length) { showToast('没有有效的用户名'); return; }
+
+            isPremiumScanning = true;
+            shouldStopPremium = false;
+            document.getElementById('startPremiumBtn').classList.add('hidden');
+            document.getElementById('stopPremiumBtn').classList.remove('hidden');
+            document.getElementById('premiumProgressBar').classList.add('active');
+            document.getElementById('premiumStats').style.display = 'grid';
+            document.getElementById('premiumResultsSection').style.display = 'block';
+            premiumResults = [];
+            document.getElementById('premiumScanTotal').textContent = usernames.length;
+            document.getElementById('premiumScanHit').textContent = '0';
+            document.getElementById('premiumResultsList').innerHTML = '';
+
+            const concurrency = 2;
+            for (let i = 0; i < usernames.length; i += concurrency) {
+                if (shouldStopPremium) break;
+                const batch = usernames.slice(i, i + concurrency);
+                await Promise.all(batch.map(async (u) => {
+                    try {
+                        const data = await apiCall('/api/check/one', 'POST', { username: u });
+                        if (data.premium && data.status === 'taken') {
+                            premiumResults.push(data);
+                            document.getElementById('premiumResultsList').innerHTML = premiumResults.map(r =>
+                                '<div style="padding:10px 16px;border-bottom:1px solid var(--border);font-size:14px;display:flex;justify-content:space-between"><span style="font-family:monospace">@' + r.username + ' ⭐</span><span style="color:#ffc107;font-size:12px">会员</span></div>'
+                            ).join('');
+                            document.getElementById('premiumScanHit').textContent = premiumResults.length;
+                        }
+                    } catch (e) {}
+                }));
+                document.getElementById('premiumProgressFill').style.width = Math.min(((i + concurrency) / usernames.length) * 100, 100) + '%';
+                if (i + concurrency < usernames.length && !shouldStopPremium) await sleep(800);
+            }
+
+            isPremiumScanning = false;
+            document.getElementById('startPremiumBtn').classList.remove('hidden');
+            document.getElementById('stopPremiumBtn').classList.add('hidden');
+
+            if (premiumResults.length) {
+                try {
+                    const data = await apiCall('/api/premium/result', 'POST', { premium: premiumResults });
+                    showToast('采集完成：发现 ' + premiumResults.length + ' 个会员，新写入 ' + data.added + ' 条');
+                    loadPremiumList();
+                } catch (err) {
+                    showToast('采集完成：发现 ' + premiumResults.length + ' 个会员，写入失败');
+                }
+            } else {
+                showToast(shouldStopPremium ? '已停止' : '采集完成，未发现会员');
+            }
+        }
+
+        function stopPremiumScan() {
+            shouldStopPremium = true;
+            isPremiumScanning = false;
+            document.getElementById('startPremiumBtn').classList.remove('hidden');
+            document.getElementById('stopPremiumBtn').classList.add('hidden');
+            showToast('正在停止...');
+        }
+
+        async function loadPremiumList() {
+            try {
+                const data = await apiCall('/api/premium');
+                const list = data.usernames || [];
+                const stored = document.getElementById('premiumStored');
+                if (stored) stored.textContent = list.length;
+                document.getElementById('premiumDocCount').textContent = '（共 ' + list.length + ' 条）';
+                document.getElementById('premiumDocList').innerHTML = list.length
+                    ? list.map(u => '<div style="padding:8px 16px;border-bottom:1px solid var(--border);font-family:monospace;font-size:13px">' + (u.startsWith('@') ? u : '@'+u) + ' ⭐</div>').join('')
+                    : '<div style="padding:16px;color:var(--text-secondary);text-align:center">暂无会员数据</div>';
+            } catch (err) {
+                showToast('加载会员文档失败: ' + err.message);
+            }
+        }
+
+        async function exportPremiumList() {
+            try {
+                const resp = await fetch('/api/premium/export', { headers: { 'Authorization': 'Bearer ' + AUTH_KEY } });
+                if (!resp.ok) throw new Error('导出失败');
+                const text = await resp.text();
+                if (!text.trim()) { showToast('会员文档为空'); return; }
+                downloadFile(text, 'tg_premium_' + new Date().toISOString().slice(0,10) + '.txt');
+                showToast('会员文档已导出');
+            } catch (err) {
+                showToast('导出失败: ' + err.message);
+            }
+        }
+
+        async function clearPremiumList() {
+            if (!confirm('确定清空全部会员文档？')) return;
+            try {
+                await apiCall('/api/premium/clear', 'POST', {});
+                showToast('会员文档已清空');
+                loadPremiumList();
+            } catch (err) {
+                showToast('清空失败: ' + err.message);
+            }
+        }
+
         // ==================== Utilities ====================
         function switchTab(tabName) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
             document.getElementById('tab-' + tabName).classList.add('active');
+            if (tabName === 'premium') loadPremiumList();
         }
 
         document.querySelectorAll('.tab').forEach(tab => {
