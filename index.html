@@ -869,14 +869,18 @@
         function clearCheck() { checkResults = []; document.getElementById('usernameInput').value = ''; document.getElementById('progressBar').classList.remove('active'); document.getElementById('checkStats').style.display = 'none'; document.getElementById('checkResultsSection').style.display = 'none'; updateCheckStats(); }
 
         function updateCheckStats() {
-            document.getElementById('checkTotal').textContent = checkResults.length;
-            document.getElementById('checkAvailable').textContent = checkResults.filter(r => r.status === 'clean' || r.collect === true).length;
-            document.getElementById('checkTaken').textContent = checkResults.filter(r => r.status === 'clean' || r.collect === true).length;
+            const set = (id, val) => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = val;
+            };
+            set('checkTotal', checkResults.length);
+            set('checkAvailable', checkResults.filter(r => r.status === 'clean' || r.collect === true).length);
+            set('checkTaken', checkResults.filter(r => r.status === 'clean' || r.collect === true).length);
+            set('checkPremium', checkResults.filter(r => !!r.premium).length);
             const premiumEl = document.getElementById('checkPremium');
             if (premiumEl) premiumEl.textContent = checkResults.filter(r => !!r.premium).length;
-            const deletedEl = document.getElementById('checkDeleted');
-            if (deletedEl) deletedEl.textContent = checkResults.filter(r => r.status === 'deleted').length;
-            document.getElementById('checkPending').textContent = checkResults.filter(r => r.status === 'checking' || r.status === 'pending').length;
+            set('checkDeleted', checkResults.filter(r => r.status === 'deleted').length);
+            set('checkPending', checkResults.filter(r => r.status === 'checking' || r.status === 'pending').length);
         }
 
         function statusLabel(status, premium) {
