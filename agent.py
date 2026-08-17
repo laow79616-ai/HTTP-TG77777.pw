@@ -13,16 +13,21 @@ from datetime import datetime
 from functools import wraps
 from flask import Flask, request, jsonify
 
+
+
 app = Flask(__name__)
 
 # ============ 配置 ============
 AUTH_KEY = "fe570f573d2840308f6a298daa3ad4a0"
+API_POOL_FILE = "/root/bot_agent/api_pool.json"
+PROXY_POOL_FILE = "/root/bot_agent/proxy_pool.json"
 LOGIN_USER = "admin"
 LOGIN_PASS = "Ab123456987"
 CONFIG_FILE = "/root/bot_agent/config.json"
 BLACKLIST_FILE = "/root/bot_agent/blacklist.json"
 AVAILABLE_FILE = "/root/bot_agent/available_usernames.json"
 PREMIUM_FILE = "/root/bot_agent/premium_usernames.json"
+TARGETS_FILE = "/root/bot_agent/target_usernames.json"
 SESSIONS_DIR = "/root/bot_agent/sessions"
 
 # Telethon API 配置（多组轮换）
@@ -91,6 +96,17 @@ def save_available(usernames):
     with open(AVAILABLE_FILE, 'w') as f:
         json.dump(usernames, f, ensure_ascii=False, indent=2)
 
+
+def load_targets():
+    if os.path.exists(TARGETS_FILE):
+        with open(TARGETS_FILE, "r") as f:
+            return json.load(f)
+    return []
+
+def save_targets(usernames):
+    with open(TARGETS_FILE, "w") as f:
+        json.dump(usernames, f, ensure_ascii=False, indent=2)
+
 def load_premium():
     if os.path.exists(PREMIUM_FILE):
         with open(PREMIUM_FILE, 'r') as f:
@@ -102,6 +118,174 @@ def save_premium(usernames):
         json.dump(usernames, f, ensure_ascii=False, indent=2)
 
 # ============ 认证中间件 ============
+
+# 广告用户识别关键词（昵称/用户名命中则标记为广告）
+AD_KEYWORDS = [
+    "代理", "开户", "博彩", "网赌", "赌", "彩票", "六合", "时时彩",
+    "兼职", "日结", "刷单", "打字员", "招聘", "招代理",
+    "加微信", "加v", "加V", "威信", "薇信",
+    "优惠", "折扣", "促销", "免费领", "领取", "红包",
+    "约炮", "交友", "裸聊", "色情",
+    "币商", "换汇", "USDT", "承兑", "代付", "代收",
+    "出粉", "引流", "精准粉", "电报粉",
+    "赌场", "棋牌", "菠菜", "百乐", "视讯",
+]
+
+def is_ad_account(username, first_name="", last_name=""):
+    text = f"{username or ''} {first_name or ''} {last_name or ''}".lower()
+    for kw in AD_KEYWORDS:
+        if kw.lower() in text:
+            return True
+    return False
+
+def is_bot_like_username(username):
+    import re
+    u = (username or "").strip().lstrip("@")
+    if not u:
+        return True
+    # 正常短用户名（如 durov）不算水军
+    digits = sum(1 for ch in u if ch.isdigit())
+    if digits == 0 and len(u) <= 12:
+        return False
+    if len(u) >= 12 and digits >= 5:
+        return True
+    # 英文名+至少5位数字：典型批量马甲
+    if re.match(r"^[A-Za-z]{3,}\d{5,}$", u):
+        return True
+    if re.match(r"^[A-Za-z]{4,}[A-Za-z]+\d{5,}$", u):
+        return True
+    if re.search(r"\d{6,}", u):
+        return True
+    return False
+
+def classify_last_online(status_obj):
+    from datetime import datetime, timezone, timedelta
+    if status_obj is None:
+        return "unknown"
+    name = type(status_obj).__name__
+    if name in ("UserStatusOnline", "UserStatusRecently", "UserStatusLastWeek"):
+        return "active"
+    if name == "UserStatusLastMonth":
+        return "active"
+    if name == "UserStatusOffline":
+        was = getattr(status_obj, "was_online", None)
+        if was is None:
+            return "unknown"
+        if getattr(was, "tzinfo", None) is None:
+            was = was.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - was > timedelta(days=30):
+            return "stale"
+        return "active"
+    if name in ("UserStatusEmpty",):
+        return "unknown"
+    return "unknown"
+
+
+def load_api_pool():
+    if os.path.exists(API_POOL_FILE):
+        with open(API_POOL_FILE, "r") as f:
+            return json.load(f)
+    return list(API_CONFIGS)
+
+def save_api_pool(pool):
+    with open(API_POOL_FILE, "w") as f:
+        json.dump(pool, f, ensure_ascii=False, indent=2)
+
+def load_proxy_pool():
+    if os.path.exists(PROXY_POOL_FILE):
+        with open(PROXY_POOL_FILE, "r") as f:
+            return json.load(f)
+    return []
+
+def save_proxy_pool(pool):
+    with open(PROXY_POOL_FILE, "w") as f:
+        json.dump(pool, f, ensure_ascii=False, indent=2)
+
+def pick_api_evenly():
+    """按当前水军已占用的 api_id 数量，选使用最少的 API"""
+    pool = load_api_pool()
+    if not pool:
+        return random.choice(API_CONFIGS)
+    config = load_config()
+    usage = {}
+    for b in config.get("bots", []):
+        aid = str(b.get("api_id") or "")
+        if aid:
+            usage[aid] = usage.get(aid, 0) + 1
+    best = None
+    best_count = 10**9
+    for item in pool:
+        aid = str(item.get("api_id"))
+        cnt = usage.get(aid, 0)
+        if cnt < best_count:
+            best_count = cnt
+            best = item
+    return best or pool[0]
+
+def pick_proxy_evenly():
+    """选使用最少的代理；池为空则返回 None"""
+    pool = load_proxy_pool()
+    if not pool:
+        return None
+    config = load_config()
+    usage = {}
+    for b in config.get("bots", []):
+        px = b.get("proxy") or ""
+        if px:
+            usage[px] = usage.get(px, 0) + 1
+    best = None
+    best_count = 10**9
+    for item in pool:
+        px = item if isinstance(item, str) else (item.get("proxy") or item.get("url") or "")
+        if not px:
+            continue
+        cnt = usage.get(px, 0)
+        if cnt < best_count:
+            best_count = cnt
+            best = px
+    return best
+
+def parse_proxy(proxy_url):
+    """支持:
+    - socks5://user:pass@host:port
+    - http://host:port
+    - host:port:user:pass
+    - host:port
+    """
+    if not proxy_url:
+        return None
+    try:
+        import python_socks
+        from urllib.parse import urlparse
+        u = str(proxy_url).strip()
+        # host:port:user:pass
+        if "://" not in u and u.count(":") >= 3:
+            parts = u.split(":")
+            host, port, user, pwd = parts[0], int(parts[1]), parts[2], ":".join(parts[3:])
+            return (python_socks.ProxyType.SOCKS5, host, port, True, user, pwd)
+        if "://" not in u and u.count(":") == 1:
+            host, port = u.split(":")
+            return (python_socks.ProxyType.SOCKS5, host, int(port), True, None, None)
+        if "://" not in u:
+            u = "socks5://" + u
+        p = urlparse(u)
+        scheme = (p.scheme or "socks5").lower()
+        host = p.hostname
+        port = p.port or 1080
+        user = p.username
+        pwd = p.password
+        if scheme.startswith("socks5"):
+            ptype = python_socks.ProxyType.SOCKS5
+        elif scheme.startswith("socks4"):
+            ptype = python_socks.ProxyType.SOCKS4
+        else:
+            ptype = python_socks.ProxyType.HTTP
+        return (ptype, host, port, True, user, pwd)
+    except Exception as e:
+        print("parse_proxy error", proxy_url, e)
+        return None
+
+
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -144,8 +328,79 @@ def api_bot_list():
 @app.route('/api/bot/remove', methods=['POST'])
 @require_auth
 def api_bot_remove():
-    data = request.json
-    bot_id = data.get('id', '')
+    data = request.json or {}
+    bot_id = data.get('id', '') or data.get('bot_id', '')
+    config = load_config()
+    config['bots'] = [b for b in config.get('bots', []) if b.get('id') != bot_id]
+    save_config(config)
+    return jsonify({"success": True, "message": "水军已删除"})
+
+@app.route('/api/bot/start', methods=['POST'])
+@require_auth
+def api_bot_start():
+    """启动水军：校验 session 可用后标记为 running"""
+    data = request.json or {}
+    bot_id = data.get('bot_id', '') or data.get('id', '')
+    config = load_config()
+    bots = config.get('bots', [])
+    found = None
+    for b in bots:
+        if b.get('id') == bot_id:
+            found = b
+            break
+    if not found:
+        return jsonify({"error": "水军不存在"}), 404
+
+    session_path = found.get('session_path', '')
+    if not session_path:
+        return jsonify({"error": "无 session 文件，请重新登录添加"}), 400
+
+    # 尝试连接验证
+    try:
+        from telethon import TelegramClient
+        api_id = int(found.get('api_id') or API_CONFIGS[0]['api_id'])
+        api_hash = found.get('api_hash') or API_CONFIGS[0]['api_hash']
+
+        async def _check():
+            client = TelegramClient(session_path, api_id, api_hash, loop=_loop)
+            await client.connect()
+            ok = await client.is_user_authorized()
+            await client.disconnect()
+            return ok
+
+        ok = run_async(_check())
+        if not ok:
+            return jsonify({"error": "Session 已失效，请重新登录该水军"}), 400
+    except Exception as e:
+        return jsonify({"error": f"启动失败: {str(e)}"}), 400
+
+    found['status'] = 'running'
+    save_config(config)
+    return jsonify({"success": True, "message": f"水军 {found.get('name', bot_id)} 已启动", "status": "running"})
+
+@app.route('/api/bot/stop', methods=['POST'])
+@require_auth
+def api_bot_stop():
+    data = request.json or {}
+    bot_id = data.get('bot_id', '') or data.get('id', '')
+    config = load_config()
+    found = None
+    for b in config.get('bots', []):
+        if b.get('id') == bot_id:
+            found = b
+            break
+    if not found:
+        return jsonify({"error": "水军不存在"}), 404
+    found['status'] = 'ready'
+    save_config(config)
+    return jsonify({"success": True, "message": f"水军 {found.get('name', bot_id)} 已停止", "status": "ready"})
+
+@app.route('/api/bot/delete', methods=['POST'])
+@require_auth
+def api_bot_delete():
+    """兼容前端 delete 调用"""
+    data = request.json or {}
+    bot_id = data.get('bot_id', '') or data.get('id', '')
     config = load_config()
     config['bots'] = [b for b in config.get('bots', []) if b.get('id') != bot_id]
     save_config(config)
@@ -153,15 +408,21 @@ def api_bot_remove():
 
 # ============ Telethon 手机号登录（异步） ============
 pending_clients = {}
+FLOOD_COOLDOWN = {}  # phone -> unix timestamp until
+CHECK_LOCK = None
 
 def get_api_config(api_id=None, api_hash=None):
-    """获取 API 配置。优先使用传入的自定义 api_id/api_hash，否则随机从系统配置中选取。"""
+    """添加水军默认从 API 池均匀分配；仅明确传入时才用自定义。"""
     if api_id and api_hash:
         try:
             return {"api_id": int(api_id), "api_hash": str(api_hash).strip()}
         except (ValueError, TypeError):
             pass
-    return random.choice(API_CONFIGS)
+    try:
+        picked = pick_api_evenly()
+        return {"api_id": int(picked["api_id"]), "api_hash": str(picked["api_hash"])}
+    except Exception:
+        return random.choice(API_CONFIGS)
 
 async def async_send_code(phone, api_id=None, api_hash=None):
     """异步发送验证码。支持自定义 api_id / api_hash。"""
@@ -236,9 +497,9 @@ def api_send_code():
     if not phone:
         return jsonify({"error": "请提供手机号"}), 400
     
-    # 支持前端传入自定义 API 配置
-    api_id = data.get('api_id') or data.get('apiId')
-    api_hash = data.get('api_hash') or data.get('apiHash')
+    # 添加水军不再使用前端 API，统一从 API 池均匀分配
+    api_id = None
+    api_hash = None
     
     try:
         result = run_async(async_send_code(phone, api_id=api_id, api_hash=api_hash))
@@ -278,6 +539,7 @@ def api_verify_code():
             "session_path": result.get("session_file", ""),
             "api_id": str(result.get("api_id", "")),
             "api_hash": result.get("api_hash", ""),
+            "proxy": pick_proxy_evenly() or "",
             "status": "ready",
             "type": "userbot",
             "added_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -293,6 +555,158 @@ def api_verify_code():
     except Exception as e:
         return jsonify({"error": f"验证失败: {str(e)}"}), 400
 
+
+# ============ API 池 / 代理池 ============
+@app.route('/api/pool/api', methods=['GET'])
+@require_auth
+def api_pool_list():
+    return jsonify({"pool": load_api_pool(), "total": len(load_api_pool())})
+
+@app.route('/api/pool/api', methods=['POST'])
+@require_auth
+def api_pool_add():
+    data = request.json or {}
+    api_id = data.get("api_id")
+    api_hash = data.get("api_hash")
+    label = data.get("label") or f"API-{api_id}"
+    if not api_id or not api_hash:
+        return jsonify({"error": "需要 api_id 和 api_hash"}), 400
+    pool = load_api_pool()
+    # 去重
+    pool = [x for x in pool if str(x.get("api_id")) != str(api_id)]
+    pool.append({"api_id": int(api_id), "api_hash": str(api_hash).strip(), "label": label})
+    save_api_pool(pool)
+    return jsonify({"success": True, "total": len(pool), "pool": pool})
+
+
+@app.route('/api/pool/api/batch', methods=['POST'])
+@require_auth
+def api_pool_add_batch():
+    """批量添加 API。支持每行: api_id-api_hash 或 api_id,api_hash 或 api_id api_hash"""
+    data = request.json or {}
+    text = data.get("lines") or data.get("text") or ""
+    if isinstance(text, list):
+        lines = [str(x).strip() for x in text if str(x).strip()]
+    else:
+        lines = [x.strip() for x in str(text).replace("\r", "\n").split("\n") if x.strip()]
+    pool = load_api_pool()
+    existing = {str(x.get("api_id")) for x in pool}
+    added = 0
+    for line in lines:
+        line = line.strip()
+        api_id, api_hash = None, None
+        if "-" in line and line.split("-", 1)[0].strip().isdigit():
+            a, b = line.split("-", 1)
+            api_id, api_hash = a.strip(), b.strip()
+        elif "," in line:
+            a, b = line.split(",", 1)
+            api_id, api_hash = a.strip(), b.strip()
+        elif "\t" in line:
+            a, b = line.split("\t", 1)
+            api_id, api_hash = a.strip(), b.strip()
+        else:
+            parts = line.split()
+            if len(parts) >= 2 and parts[0].isdigit():
+                api_id, api_hash = parts[0], parts[1]
+        if not api_id or not api_hash:
+            continue
+        if str(api_id) in existing:
+            continue
+        try:
+            pool.append({"api_id": int(api_id), "api_hash": api_hash, "label": f"API-{api_id}"})
+            existing.add(str(api_id))
+            added += 1
+        except Exception:
+            continue
+    save_api_pool(pool)
+    return jsonify({"success": True, "added": added, "total": len(pool)})
+
+@app.route('/api/pool/api/delete', methods=['POST'])
+@require_auth
+def api_pool_del():
+    data = request.json or {}
+    api_id = str(data.get("api_id", ""))
+    pool = [x for x in load_api_pool() if str(x.get("api_id")) != api_id]
+    save_api_pool(pool)
+    return jsonify({"success": True, "total": len(pool)})
+
+@app.route('/api/pool/api/redistribute', methods=['POST'])
+@require_auth
+def api_pool_redistribute():
+    """一键均匀分配 API 到所有水军"""
+    pool = load_api_pool()
+    if not pool:
+        return jsonify({"error": "API 池为空"}), 400
+    config = load_config()
+    bots = config.get("bots", [])
+    for i, b in enumerate(bots):
+        item = pool[i % len(pool)]
+        b["api_id"] = int(item["api_id"])
+        b["api_hash"] = item["api_hash"]
+    save_config(config)
+    return jsonify({"success": True, "message": f"已均匀分配 {len(bots)} 个水军", "bots": len(bots), "apis": len(pool)})
+
+@app.route('/api/pool/proxy', methods=['GET'])
+@require_auth
+def proxy_pool_list():
+    return jsonify({"pool": load_proxy_pool(), "total": len(load_proxy_pool())})
+
+@app.route('/api/pool/proxy', methods=['POST'])
+@require_auth
+def proxy_pool_add():
+    data = request.json or {}
+    # 支持单条或批量 lines
+    lines = data.get("proxies") or data.get("lines") or []
+    if isinstance(lines, str):
+        lines = [x.strip() for x in lines.split("\n") if x.strip()]
+    single = data.get("proxy") or data.get("url")
+    if single:
+        lines.append(single)
+    pool = load_proxy_pool()
+    existing = set()
+    for x in pool:
+        existing.add(x if isinstance(x, str) else (x.get("proxy") or x.get("url") or ""))
+    added = 0
+    for line in lines:
+        line = line.strip()
+        if not line or line in existing:
+            continue
+        pool.append({"proxy": line, "label": line[:40]})
+        existing.add(line)
+        added += 1
+    save_proxy_pool(pool)
+    return jsonify({"success": True, "added": added, "total": len(pool)})
+
+@app.route('/api/pool/proxy/delete', methods=['POST'])
+@require_auth
+def proxy_pool_del():
+    data = request.json or {}
+    px = data.get("proxy") or ""
+    pool = []
+    for x in load_proxy_pool():
+        val = x if isinstance(x, str) else (x.get("proxy") or x.get("url") or "")
+        if val != px:
+            pool.append(x)
+    save_proxy_pool(pool)
+    return jsonify({"success": True, "total": len(pool)})
+
+@app.route('/api/pool/proxy/redistribute', methods=['POST'])
+@require_auth
+def proxy_pool_redistribute():
+    """一键均匀分配代理到所有水军"""
+    pool = load_proxy_pool()
+    if not pool:
+        return jsonify({"error": "代理池为空"}), 400
+    config = load_config()
+    bots = config.get("bots", [])
+    for i, b in enumerate(bots):
+        item = pool[i % len(pool)]
+        px = item if isinstance(item, str) else (item.get("proxy") or item.get("url") or "")
+        b["proxy"] = px
+    save_config(config)
+    return jsonify({"success": True, "message": f"已均匀分配代理到 {len(bots)} 个水军", "bots": len(bots), "proxies": len(pool)})
+
+
 # ============ 批量检测接口（真实 Telegram 查询） ============
 
 async def async_check_one_username(client, username):
@@ -307,12 +721,17 @@ async def async_check_one_username(client, username):
             if getattr(user, 'deleted', False):
                 return {"username": username, "status": "deleted", "premium": False}
             is_premium = bool(getattr(user, 'premium', False))
+            fn = getattr(user, 'first_name', '') or ''
+            ln = getattr(user, 'last_name', '') or ''
+            ad = is_ad_account(username, fn, ln)
             return {
                 "username": username,
-                "status": "taken",
+                "status": "ad" if ad and not is_premium else "taken",
                 "premium": is_premium,
+                "is_ad": ad,
                 "user_id": getattr(user, 'id', None),
-                "first_name": getattr(user, 'first_name', '') or '',
+                "first_name": fn,
+                "last_name": ln,
             }
         chats = getattr(result, 'chats', None) or []
         if chats:
@@ -345,18 +764,21 @@ async def async_check_usernames_batch(usernames, bot_sessions):
     try:
         for sess in bot_sessions:
             try:
+                sp = sess["session_path"]
+                # Telethon 接受不带 .session 后缀的路径
                 client = TelegramClient(
-                    sess["session_path"],
+                    sp,
                     int(sess["api_id"]),
-                    sess["api_hash"],
-                    loop=_loop
+                    str(sess["api_hash"]),
                 )
                 await client.connect()
-                if await client.is_user_authorized():
+                ok = await client.is_user_authorized()
+                if ok:
                     clients.append(client)
                 else:
                     await client.disconnect()
-            except Exception:
+            except Exception as e:
+                print(f"[check] session fail {sess.get('session_path')}: {e}")
                 continue
 
         if not clients:
@@ -421,28 +843,158 @@ def api_check_usernames():
 @app.route('/api/check/one', methods=['POST'])
 @require_auth
 def api_check_one():
-    """检测单个用户名"""
+    """检测单个用户名：最多试3个水军，单号8秒超时，FloodWait自动冷却"""
+    import time
     data = request.json or {}
     username = (data.get('username') or '').strip().lstrip('@')
     if not username:
         return jsonify({"error": "请提供用户名"}), 400
 
     config = load_config()
-    bot_sessions = []
-    for bot in config.get('bots', []):
-        if bot.get('session_path'):
-            bot_sessions.append({
-                "session_path": bot["session_path"],
-                "api_id": bot.get("api_id") or API_CONFIGS[0]["api_id"],
-                "api_hash": bot.get("api_hash") or API_CONFIGS[0]["api_hash"],
-            })
-            break
+    bots = [b for b in config.get('bots', []) if b.get('session_path')]
+    if not bots:
+        return jsonify({"username": username, "status": "error", "error": "无可用水军账号"})
+
+    now = time.time()
+    # 过滤还在冷却的号
+    ready = []
+    for b in bots:
+        phone = b.get("phone") or b.get("id") or ""
+        until = FLOOD_COOLDOWN.get(phone, 0)
+        if until > now:
+            continue
+        ready.append(b)
+    if not ready:
+        ready = bots  # 全在冷却则仍尝试，避免完全不可用
+
+    start_idx = sum(ord(ch) for ch in username) % len(ready)
+    ordered = ready[start_idx:] + ready[:start_idx]
+    ordered = ordered[:3]  # 最多试3个号
+
+    async def _one():
+        from telethon import TelegramClient
+        from telethon.tl.functions.contacts import ResolveUsernameRequest
+        from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError, FloodWaitError
+        last_err = "全部水军失败"
+        for bot in ordered:
+            phone = bot.get("phone") or bot.get("id") or ""
+            sp = bot.get("session_path")
+            client = None
+            try:
+                api_id = int(bot.get("api_id") or API_CONFIGS[0]["api_id"])
+                api_hash = str(bot.get("api_hash") or API_CONFIGS[0]["api_hash"])
+                # 暂时不用代理，避免断连
+                client = TelegramClient(sp, api_id, api_hash)
+                await asyncio.wait_for(client.connect(), timeout=8)
+                if not await asyncio.wait_for(client.is_user_authorized(), timeout=5):
+                    last_err = f"{phone} 未授权"
+                    await client.disconnect()
+                    continue
+                try:
+                    entity = await asyncio.wait_for(client.get_entity(username), timeout=10)
+                    et = type(entity).__name__
+                    if et == "User" or (hasattr(entity, "first_name") and hasattr(entity, "bot") and not getattr(entity, "broadcast", False) and not getattr(entity, "megagroup", False)):
+                        user = entity
+                        if getattr(user, 'deleted', False):
+                            out = {"username": username, "status": "deleted", "premium": False, "collect": False}
+                        else:
+                            fn = getattr(user, 'first_name', '') or ''
+                            ln = getattr(user, 'last_name', '') or ''
+                            premium = bool(getattr(user, 'premium', False))
+                            is_bot = bool(getattr(user, 'bot', False))
+                            ad = is_ad_account(username, fn, ln)
+                            bot_like = is_bot_like_username(username) or is_bot
+                            online_kind = classify_last_online(getattr(user, 'status', None))
+                            if ad:
+                                st = "ad"
+                                collect = False
+                            elif bot_like:
+                                st = "spam"
+                                collect = False
+                            elif online_kind == "stale":
+                                st = "inactive"
+                                collect = False
+                            else:
+                                st = "clean"
+                                collect = True
+                            out = {
+                                "username": username,
+                                "status": st,
+                                "premium": premium,
+                                "is_ad": ad,
+                                "is_spam": bot_like,
+                                "online": online_kind,
+                                "collect": collect,
+                                "user_id": getattr(user, 'id', None),
+                                "first_name": fn,
+                                "last_name": ln,
+                            }
+                    else:
+                        # 频道/群：不是个人用户采集对象
+                        out = {"username": username, "status": "unavailable", "premium": False, "collect": False, "is_spam": False, "entity_type": type(entity).__name__}
+                    await client.disconnect()
+                    return out
+                except UsernameNotOccupiedError:
+                    await client.disconnect()
+                    return {"username": username, "status": "available", "premium": False, "collect": False}
+                except UsernameInvalidError:
+                    await client.disconnect()
+                    return {"username": username, "status": "invalid", "premium": False, "collect": False}
+                except ValueError as e:
+                    # get_entity 找不到时常见 ValueError
+                    msg = str(e).lower()
+                    await client.disconnect()
+                    if "no user" in msg or "not found" in msg or "nobody" in msg:
+                        return {"username": username, "status": "available", "premium": False, "collect": False}
+                    return {"username": username, "status": "error", "error": str(e)[:100], "premium": False}
+                except FloodWaitError as e:
+                    # 冷却：最多记 6 小时，避免一次记 20 小时导致全废
+                    sec = min(int(e.seconds), 6 * 3600)
+                    FLOOD_COOLDOWN[phone] = time.time() + sec
+                    last_err = f"FloodWait {e.seconds}s"
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    continue
+                except asyncio.TimeoutError:
+                    last_err = "查询超时"
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    continue
+                except Exception as e:
+                    last_err = str(e)[:100]
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    continue
+            except asyncio.TimeoutError:
+                last_err = "连接超时"
+                if client:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                continue
+            except Exception as e:
+                last_err = str(e)[:100]
+                if client:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                continue
+        return {"username": username, "status": "error", "error": last_err, "premium": False}
 
     try:
-        results = run_async(async_check_usernames_batch([username], bot_sessions))
-        return jsonify(results[0] if results else {"username": username, "status": "error"})
+        result = run_async(_one())
+        return jsonify(result)
     except Exception as e:
-        return jsonify({"username": username, "status": "error", "error": str(e)}), 500
+        return jsonify({"username": username, "status": "error", "error": str(e)[:120]}), 500
+
 
 @app.route('/api/check/result', methods=['POST'])
 @require_auth
@@ -506,6 +1058,59 @@ def api_export_available():
 
 
 # ============ Telegram 会员（Premium）采集接口 ============
+
+@app.route('/api/targets', methods=['GET'])
+@require_auth
+def api_get_targets():
+    t = load_targets()
+    return jsonify({"usernames": t, "total": len(t)})
+
+@app.route('/api/targets/clear', methods=['POST'])
+@require_auth
+def api_clear_targets():
+    save_targets([])
+    return jsonify({"success": True})
+
+@app.route('/api/targets/export', methods=['GET'])
+@require_auth
+def api_export_targets():
+    t = load_targets()
+    return "\n".join(t), 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+@app.route('/api/targets/result', methods=['POST'])
+@require_auth
+def api_targets_result():
+    """只写入干净活跃用户（非广告/非水军/非销号/非长期未在线）"""
+    data = request.json or {}
+    items = data.get("targets") or data.get("results") or data.get("usernames") or []
+    targets = load_targets()
+    existing = {str(x).lower().lstrip("@") for x in targets}
+    added = 0
+    for item in items:
+        if isinstance(item, dict):
+            st = (item.get("status") or "").lower()
+            if st in ("ad", "spam", "inactive", "deleted", "available", "invalid", "error", "flood", "unavailable"):
+                continue
+            if item.get("is_ad") or item.get("is_spam"):
+                continue
+            if item.get("collect") is False and st != "clean":
+                continue
+            if st not in ("clean", "taken") and not item.get("collect"):
+                continue
+            username = (item.get("username") or "").strip().lstrip("@")
+        else:
+            continue
+        if not username:
+            continue
+        key = username.lower()
+        if key in existing:
+            continue
+        targets.append("@" + username)
+        existing.add(key)
+        added += 1
+    save_targets(targets)
+    return jsonify({"success": True, "added": added, "total": len(targets)})
+
 @app.route('/api/premium', methods=['GET'])
 @require_auth
 def api_get_premium():

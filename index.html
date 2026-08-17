@@ -454,7 +454,7 @@
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('premium')">会员</button>
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('deleted')">已删除</button>
                 </div>
-                <p style="color:var(--text-secondary);font-size:12px;margin-bottom:8px;">提示：已删除账号不会写入有用文档</p>
+                <p style="color:var(--text-secondary);font-size:12px;margin-bottom:8px;">提示：只采集干净活跃用户与会员；广告/水军/关键词/注销/未注册均不采集（不是找可注册空号）</p>
                 <div class="username-list" id="checkResultsList" style="max-height:500px;overflow-y:auto;background:var(--bg);border-radius:10px;padding:8px 0;border:1px solid var(--border)"></div>
             </div>
         </div>
@@ -865,27 +865,33 @@
 
         function updateCheckStats() {
             document.getElementById('checkTotal').textContent = checkResults.length;
-            document.getElementById('checkAvailable').textContent = checkResults.filter(r => r.status === 'available').length;
-            document.getElementById('checkTaken').textContent = checkResults.filter(r => r.status === 'taken').length;
+            document.getElementById('checkAvailable').textContent = checkResults.filter(r => r.status === 'clean' || r.collect === true).length;
+            document.getElementById('checkTaken').textContent = checkResults.filter(r => r.status === 'clean' || r.collect === true).length;
             const premiumEl = document.getElementById('checkPremium');
-            if (premiumEl) premiumEl.textContent = checkResults.filter(r => r.premium && r.status === 'taken').length;
+            if (premiumEl) premiumEl.textContent = checkResults.filter(r => !!r.premium).length;
             const deletedEl = document.getElementById('checkDeleted');
             if (deletedEl) deletedEl.textContent = checkResults.filter(r => r.status === 'deleted').length;
             document.getElementById('checkPending').textContent = checkResults.filter(r => r.status === 'checking' || r.status === 'pending').length;
         }
 
         function statusLabel(status, premium) {
-            if (premium && status === 'taken') {
+            if (premium) {
                 return { text: '会员', color: '#ffc107' };
             }
             const map = {
-                available: { text: '可用', color: 'var(--success)' },
-                taken: { text: '已占用', color: 'var(--danger)' },
-                deleted: { text: '已删除', color: '#9c27b0' },
+                clean: { text: '可用', color: 'var(--success)' },
+                taken: { text: '可用', color: 'var(--success)' },
+                available: { text: '未注册', color: '#607d8b' },
+                ad: { text: '广告', color: '#ff5722' },
+                spam: { text: '水军', color: '#795548' },
+                inactive: { text: '长期未在线', color: '#9e9e9e' },
+                deleted: { text: '已注销', color: '#9c27b0' },
                 invalid: { text: '无效', color: 'var(--warning)' },
                 error: { text: '错误', color: 'var(--text-secondary)' },
+                flood: { text: '限流', color: '#ff9800' },
                 checking: { text: '检测中', color: 'var(--warning)' },
-                pending: { text: '等待', color: 'var(--text-secondary)' }
+                pending: { text: '等待', color: 'var(--text-secondary)' },
+                unavailable: { text: '非个人', color: '#607d8b' }
             };
             return map[status] || { text: status, color: 'var(--text)' };
         }
