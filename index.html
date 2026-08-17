@@ -410,7 +410,7 @@
                 <div class="form-row">
                     <div class="form-group">
                         <label>检测间隔（毫秒）</label>
-                        <input type="text" id="delayInput" value="1000">
+                        <input type="text" id="delayInput" value="3000">
                     </div>
                     <div class="form-group">
                         <label>并发数量</label>
@@ -439,7 +439,7 @@
             <div class="stats" id="checkStats" style="display:none">
                 <div class="stat-card"><div class="number" id="checkTotal" style="color:var(--primary)">0</div><div class="label">总计</div></div>
                 <div class="stat-card"><div class="number" id="checkAvailable" style="color:var(--success)">0</div><div class="label">可用</div></div>
-                <div class="stat-card"><div class="number" id="checkTaken" style="color:var(--danger)">0</div><div class="label">已占用</div></div>
+                
                 <div class="stat-card"><div class="number" id="checkPremium" style="color:#ffc107">0</div><div class="label">会员</div></div>
                 <div class="stat-card"><div class="number" id="checkDeleted" style="color:#9c27b0">0</div><div class="label">已删除</div></div>
                 <div class="stat-card"><div class="number" id="checkPending" style="color:var(--warning)">0</div><div class="label">检测中</div></div>
@@ -450,11 +450,11 @@
                 <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('all')">全部</button>
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('available')">可用</button>
-                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('taken')">已占用</button>
+                    
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('premium')">会员</button>
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('deleted')">已删除</button>
                 </div>
-                <p style="color:var(--text-secondary);font-size:12px;margin-bottom:8px;">提示：只采集干净活跃用户与会员；广告/水军/关键词/注销/未注册均不采集（不是找可注册空号）</p>
+                <p style="color:var(--text-secondary);font-size:12px;margin-bottom:8px;">提示：本轮：可用=干净活跃；会员=Premium。导出本轮≠服务器累计。广告/水军/注销/未注册不采集。</p>
                 <div class="username-list" id="checkResultsList" style="max-height:500px;overflow-y:auto;background:var(--bg);border-radius:10px;padding:8px 0;border:1px solid var(--border)"></div>
             </div>
         </div>
@@ -828,7 +828,12 @@
             updateCheckStats(); renderCheckResults();
 
             const delay = parseInt(document.getElementById('delayInput').value) || 1000;
-            const concurrency = parseInt(document.getElementById('concurrencySelect').value) || 3;
+            let concurrency = parseInt(document.getElementById('concurrencySelect').value) || 1;
+            const modeSel = (document.getElementById('checkMode') || {}).value || 'real';
+            if (modeSel === 'real' && concurrency > 1) {
+                concurrency = 1;
+                showToast('真实检测已强制并发=1，降低限流风险');
+            }
 
             for (let i = 0; i < usernames.length; i += concurrency) {
                 if (shouldStop) break;
@@ -875,9 +880,7 @@
         }
 
         function statusLabel(status, premium) {
-            if (premium) {
-                return { text: '会员', color: '#ffc107' };
-            }
+            if (premium) return { text: '会员', color: '#ffc107' };
             const map = {
                 clean: { text: '可用', color: 'var(--success)' },
                 taken: { text: '可用', color: 'var(--success)' },
@@ -893,7 +896,7 @@
                 pending: { text: '等待', color: 'var(--text-secondary)' },
                 unavailable: { text: '非个人', color: '#607d8b' }
             };
-            return map[status] || { text: status, color: 'var(--text)' };
+            return map[status] || { text: status || '-', color: 'var(--text)' };
         }
 
         function renderCheckResults(filter = 'all') {
@@ -912,14 +915,69 @@
         }
         function filterCheckResults(f) { renderCheckResults(f); }
 
+        async function saveTargetsFromCheck() {
+            const hits = checkResults.filter(r => r.status === 'clean' || r.collect === true || (r.status === 'taken' && !r.is_ad && !r.is_spam));
+            if (!hits.length) { showToast('当前结果中没有可写入的可用用户'); return; }
+            try {
+                const data = await apiCall('/api/targets/result', 'POST', { targets: hits });
+                showToast('已写入可用文档 ' + (data.added != null ? data.added : hits.length) + ' 条，文档共 ' + (data.total || '') + ' 条');
+            } catch (err) {
+                showToast('写入失败: ' + err.message);
+            }
+        }
+
+        
+        function downloadTextFile(text, filename) {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+            a.download = filename;
+            a.click();
+        }
+        function getBatchClean() {
+            return checkResults.filter(r => r.status === 'clean' || r.collect === true);
+        }
+        function getBatchPremium() {
+            return checkResults.filter(r => !!r.premium);
+        }
+        function exportBatchClean() {
+            const list = getBatchClean();
+            if (!list.length) { showToast('本轮没有可用用户'); return; }
+            const text = list.map(r => '@' + String(r.username||'').replace(/^@/,'')).join('\n');
+            downloadTextFile(text, '本轮可用_' + list.length + '.txt');
+            showToast('已导出本轮可用 ' + list.length + ' 条');
+        }
+        function exportBatchPremium() {
+            const list = getBatchPremium();
+            if (!list.length) { showToast('本轮没有会员'); return; }
+            const text = list.map(r => '@' + String(r.username||'').replace(/^@/,'')).join('\n');
+            downloadTextFile(text, '本轮会员_' + list.length + '.txt');
+            showToast('已导出本轮会员 ' + list.length + ' 条');
+        }
+        async function savePremiumFromCheck() {
+            const premiumHits = getBatchPremium();
+            if (!premiumHits.length) { showToast('当前结果中没有会员'); return; }
+            try {
+                const data = await apiCall('/api/premium/result', 'POST', { premium: premiumHits });
+                showToast('已写入会员文档 ' + (data.added??premiumHits.length) + ' 条，累计 ' + (data.total||'') + ' 条');
+            } catch (err) { showToast('写入失败: ' + err.message); }
+        }
+        async function saveTargetsFromCheck() {
+            const hits = getBatchClean();
+            if (!hits.length) { showToast('当前结果中没有可用用户'); return; }
+            try {
+                const data = await apiCall('/api/targets/result', 'POST', { targets: hits });
+                showToast('已写入可用文档 ' + (data.added??hits.length) + ' 条，累计 ' + (data.total||'') + ' 条');
+            } catch (err) { showToast('写入失败: ' + err.message); }
+        }
+
         function exportResults(type) {
             let data;
             if (type === 'available') {
-                data = checkResults.filter(r => r.status === 'available');
+                data = checkResults.filter(r => r.status === 'clean' || r.collect === true || (r.premium && r.status !== 'ad' && r.status !== 'spam'));
             } else if (type === 'taken') {
                 data = checkResults.filter(r => r.status === 'taken');
             } else if (type === 'premium') {
-                data = checkResults.filter(r => r.premium && r.status === 'taken');
+                data = checkResults.filter(r => !!r.premium);
             } else if (type === 'deleted') {
                 data = checkResults.filter(r => r.status === 'deleted');
             } else {
@@ -932,11 +990,11 @@
         }
 
         async function savePremiumFromCheck() {
-            const premiumHits = checkResults.filter(r => r.premium && r.status === 'taken');
+            const premiumHits = checkResults.filter(r => !!r.premium);
             if (!premiumHits.length) { showToast('当前结果中没有会员'); return; }
             try {
                 const data = await apiCall('/api/premium/result', 'POST', { premium: premiumHits });
-                showToast('已写入会员文档 ' + data.added + ' 条，文档共 ' + data.total + ' 条');
+                showToast('已写入会员文档 ' + (data.added != null ? data.added : premiumHits.length) + ' 条，文档共 ' + (data.total || '') + ' 条');
             } catch (err) {
                 showToast('写入失败: ' + err.message);
             }
