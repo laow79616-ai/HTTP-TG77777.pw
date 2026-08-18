@@ -571,6 +571,82 @@
         }
 
         // ==================== API ====================
+        
+        let networkPaused = false;
+        let pendingResume = false;
+        function isNetworkErrorMessage(msg) {
+            const s = String(msg || '').toLowerCase();
+            return (
+                s.includes('failed to fetch') ||
+                s.includes('networkerror') ||
+                s.includes('network error') ||
+                s.includes('err_internet_disconnected') ||
+                s.includes('err_name_not_resolved') ||
+                s.includes('err_connection') ||
+                s.includes('load failed') ||
+                s.includes('internet disconnected')
+            );
+        }
+        async function waitUntilOnline(timeoutMs) {
+            const start = Date.now();
+            while (!navigator.onLine) {
+                if (Date.now() - start > (timeoutMs || 600000)) return false;
+                await sleep(2000);
+            }
+            // 再探活后端
+            for (let i = 0; i < 15; i++) {
+                try {
+                    const r = await fetch('/health', { cache: 'no-store' });
+                    if (r.ok) return true;
+                } catch (e) {}
+                await sleep(2000);
+            }
+            return navigator.onLine;
+        }
+        function pauseForNetwork(reason) {
+            if (networkPaused) return;
+            networkPaused = true;
+            shouldStop = true;
+            pendingResume = isChecking || (checkResults || []).some(r => r.status === 'pending' || r.status === 'checking');
+            try { showToast('网络异常，已自动停止: ' + (reason || '')); } catch (e) {}
+            const startBtn = document.getElementById('startCheckBtn');
+            const stopBtn = document.getElementById('stopCheckBtn');
+            if (startBtn) startBtn.classList.remove('hidden');
+            if (stopBtn) stopBtn.classList.add('hidden');
+        }
+        async function tryResumeAfterNetwork() {
+            if (!pendingResume) return;
+            const ok = await waitUntilOnline(120000);
+            if (!ok) {
+                try { showToast('网络仍未恢复，请手动继续检测'); } catch (e) {}
+                networkPaused = false;
+                return;
+            }
+            networkPaused = false;
+            pendingResume = false;
+            // 只续跑还在 pending 的
+            const left = (checkResults || []).filter(r => r.status === 'pending' || r.status === 'error').map(r => r.username);
+            if (!left.length) {
+                try { showToast('网络已恢复，没有待检测项'); } catch (e) {}
+                return;
+            }
+            try { showToast('网络已恢复，自动继续剩余 ' + left.length + ' 个'); } catch (e) {}
+            // 填回输入框并触发检测（避免重复已完成的）
+            const input = document.getElementById('usernameInput');
+            if (input) input.value = left.join('\n');
+            if (typeof startCheck === 'function') {
+                // 稍等 UI
+                setTimeout(() => { try { startCheck(); } catch (e) {} }, 500);
+            }
+        }
+        window.addEventListener('offline', function() {
+            pauseForNetwork('浏览器 offline');
+        });
+        window.addEventListener('online', function() {
+            try { showToast('网络已连接，准备续跑…'); } catch (e) {}
+            tryResumeAfterNetwork();
+        });
+
         async function apiCall(endpoint, method = 'GET', body = null) {
             const url = endpoint;
             const options = {
