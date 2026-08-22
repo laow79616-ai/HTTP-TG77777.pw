@@ -357,6 +357,37 @@ def bot_daily_left(bot_key, limit=None):
     used = int(data.get("counts", {}).get(str(bot_key), 0))
     return max(limit - used, 0), used, limit
 
+
+def proxy_ip_key(proxy):
+    """从 proxy 串提取 IP，作为线路 key"""
+    if not proxy:
+        return "direct"
+    s = str(proxy).strip()
+    # ip:port:user:pass 或 host:port
+    host = s.split(":")[0].strip()
+    return host or "direct"
+
+def list_workable_bots_by_ip(config=None):
+    """可工作水军按 IP 线路分组，选号时跨 IP 轮转，避免同一线路打爆"""
+    bots = list_workable_bots(config)
+    # 按 IP 分组
+    groups = {}
+    for b in bots:
+        ip = proxy_ip_key(b.get("proxy"))
+        groups.setdefault(ip, []).append(b)
+    # 跨组交错：ip1号1, ip2号1, ip3号1, ip1号2...
+    ordered = []
+    if not groups:
+        return ordered
+    keys = list(groups.keys())
+    max_len = max(len(v) for v in groups.values())
+    for i in range(max_len):
+        for k in keys:
+            if i < len(groups[k]):
+                ordered.append(groups[k][i])
+    return ordered
+
+
 def list_workable_bots(config=None):
     """未冷却且未超每日上限的水军"""
     if config is None:
@@ -949,7 +980,7 @@ def api_check_one():
         return jsonify({"error": "请提供用户名", "status": "error", "username": ""}), 400
 
     config = load_config()
-    workable = list_workable_bots(config)
+    workable = list_workable_bots_by_ip(config)
     if not workable:
         # 区分全冷却 / 全日额满
         all_bots = config.get('bots') or []
@@ -1600,6 +1631,93 @@ def api_stats():
     })
 
 # ============ 健康检查 ============
+
+@app.route('/api/pool/api/batch', methods=['POST'])
+@require_auth
+def api_pool_api_batch():
+    """批量添加 API，不限制条数。支持 text 或 lines，格式 api_id-api_hash / api_id:api_hash"""
+    data = request.json or {}
+    text = data.get('text') or ''
+    lines = data.get('lines') or []
+    if text and not lines:
+        lines = str(text).splitlines()
+    pool = load_api_pool()
+    existing = {str(x.get('api_id')) for x in pool}
+    added = 0
+    for line in lines:
+        line = str(line).strip()
+        if not line:
+            continue
+        api_id, api_hash = None, None
+        if '-' in line:
+            a, b = line.split('-', 1)
+            api_id, api_hash = a.strip(), b.strip()
+        elif ':' in line:
+            a, b = line.split(':', 1)
+            api_id, api_hash = a.strip(), b.strip()
+        elif ' ' in line:
+            parts = line.split()
+            if len(parts) >= 2:
+                api_id, api_hash = parts[0].strip(), parts[1].strip()
+        if not api_id or not api_hash:
+            continue
+        if str(api_id) in existing:
+            continue
+        try:
+            api_id_i = int(api_id)
+        except Exception:
+            continue
+        pool.append({"api_id": api_id_i, "api_hash": api_hash, "label": f"API-{api_id_i}"})
+        existing.add(str(api_id_i))
+        added += 1
+    save_api_pool(pool)
+    return jsonify({"success": True, "added": added, "total": len(pool)})
+
+@app.route('/api/pool/proxy/batch', methods=['POST'])
+@require_auth
+def api_pool_proxy_batch():
+    """批量添加代理，不限制条数"""
+    import os, json
+    data = request.json or {}
+    text = data.get('text') or ''
+    lines = data.get('lines') or data.get('proxies') or []
+    if text and not lines:
+        lines = str(text).splitlines()
+    path = PROXY_POOL_FILE if 'PROXY_POOL_FILE' in globals() or 'PROXY_POOL_FILE' in dir() else '/root/bot_agent/proxy_pool.json'
+    # dir() in function is wrong for global - use globals
+    path = globals().get('PROXY_POOL_FILE', '/root/bot_agent/proxy_pool.json')
+    raw = []
+    if os.path.exists(path):
+        try:
+            raw = json.load(open(path))
+        except Exception:
+            raw = []
+    # normalize to list of dicts
+    norm = []
+    seen = set()
+    for x in raw:
+        if isinstance(x, str):
+            s = x.strip()
+            if s and s not in seen:
+                norm.append({"proxy": s, "label": s[:40]})
+                seen.add(s)
+        elif isinstance(x, dict):
+            s = (x.get('proxy') or x.get('url') or '').strip()
+            if s and s not in seen:
+                norm.append({"proxy": s, "label": x.get('label') or s[:40]})
+                seen.add(s)
+    added = 0
+    for line in lines:
+        s = str(line).strip()
+        if not s or s in seen:
+            continue
+        norm.append({"proxy": s, "label": s[:40]})
+        seen.add(s)
+        added += 1
+    json.dump(norm, open(path, 'w'), ensure_ascii=False, indent=2)
+    return jsonify({"success": True, "added": added, "total": len(norm)})
+
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({"status": "ok", "time": datetime.now().isoformat()})
