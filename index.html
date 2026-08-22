@@ -395,6 +395,27 @@
         <div class="tab-content" id="tab-check">
             <div class="card">
                 <h3>批量检测用户名</h3>
+
+            <div id="detectStatusBar" style="display:flex;gap:10px;flex-wrap:wrap;margin:0 0 12px;align-items:stretch;">
+                <div style="flex:1;min-width:100px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px 12px;text-align:center;">
+                    <div id="dsWork" style="font-size:22px;font-weight:700;color:#4caf50;">-</div>
+                    <div style="font-size:12px;opacity:.75;margin-top:2px;">工作中</div>
+                </div>
+                <div style="flex:1;min-width:100px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px 12px;text-align:center;">
+                    <div id="dsCool" style="font-size:22px;font-weight:700;color:#ff9800;">-</div>
+                    <div style="font-size:12px;opacity:.75;margin-top:2px;">冷却中</div>
+                </div>
+                <div style="flex:1;min-width:100px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px 12px;text-align:center;">
+                    <div id="dsCapped" style="font-size:22px;font-weight:700;color:#f44336;">-</div>
+                    <div style="font-size:12px;opacity:.75;margin-top:2px;">今日已满</div>
+                </div>
+                <div style="flex:1;min-width:100px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px 12px;text-align:center;">
+                    <div id="dsToday" style="font-size:22px;font-weight:700;color:#2196f3;">-</div>
+                    <div style="font-size:12px;opacity:.75;margin-top:2px;">今日检测</div>
+                </div>
+            </div>
+            <div id="botWorkStatus" style="font-size:12px;opacity:.8;margin:-4px 0 12px;">每批≤300 · 每号每日≤500</div>
+
                 <div class="file-upload" id="fileUpload">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                         <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
@@ -423,7 +444,7 @@
                     </div>
                 </div>
                 <div style="display:flex;gap:12px;flex-wrap:wrap">
-                    <button class="btn btn-primary" id="startCheckBtn" onclick="startCheck()">开始检测</button>
+                    <button class="btn btn-primary" id="startCheckBtn" onclick="startCheckQueued()">开始检测</button>
                     <button class="btn btn-danger hidden" id="stopCheckBtn" onclick="stopCheck()">停止</button>
                     <button class="btn btn-secondary" onclick="clearCheck()">清空</button>
                     <button class="btn btn-success" onclick="exportResults('all')">导出全部</button>
@@ -436,8 +457,17 @@
 
             <div class="progress-bar" id="progressBar"><div class="fill" id="progressFill"></div></div>
 
-            <div class="stats" id="checkStats" style="display:none">
-                <div class="stat-card"><div class="number" id="checkTotal" style="color:var(--primary)">0</div><div class="label">总计</div></div>
+            <div class="stats" id="queueTip" style="font-size:12px;opacity:.8;margin:0 0 8px;">总导入 · 本批 · 队列</div>
+            <div id="checkStats" style="display:grid;grid-template-columns:repeat(7,1fr);gap:10px;margin:12px 0;">
+                <div class="stat-card"><div class="number" id="checkTotal" style="color:var(--primary)">0</div><div class="label">总导入</div></div>
+                    <div class="stat-card" style="text-align:center;padding:12px;border-radius:10px;background:rgba(255,255,255,.04);">
+                        <div class="number" id="checkBatch" style="font-size:22px;font-weight:700;">0</div>
+                        <div class="label" style="font-size:12px;opacity:.75;">本批工作</div>
+                    <div class="stat-card" style="text-align:center;padding:12px;border-radius:10px;background:rgba(255,255,255,.04);">
+                        <div class="number" id="checkRemain" style="font-size:22px;font-weight:700;color:#ff9800;">0</div>
+                        <div class="label" style="font-size:12px;opacity:.75;">队列剩余</div>
+                    </div>
+                    </div>
                 <div class="stat-card"><div class="number" id="checkAvailable" style="color:var(--success)">0</div><div class="label">可用</div></div>
                 
                 <div class="stat-card"><div class="number" id="checkPremium" style="color:#ffc107">0</div><div class="label">会员</div></div>
@@ -445,8 +475,9 @@
                 <div class="stat-card"><div class="number" id="checkPending" style="color:var(--warning)">0</div><div class="label">检测中</div></div>
             </div>
 
-            <div class="card" id="checkResultsSection" style="display:none">
-                <h3>检测结果</h3>
+            <div class="card" id="checkResultsSection" style="display:block">
+                <h3><div id="botWorkStatus" style="font-size:13px;color:var(--text-secondary);margin:8px 0 4px;">水军状态加载中…</div>
+            检测结果</h3>
                 <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('all')">全部</button>
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('available')">可用</button>
@@ -559,6 +590,7 @@
             }).catch(() => {});
         }
 
+        setInterval(function(){ try{ if(typeof refreshBotWorkStatus==='function') refreshBotWorkStatus(); }catch(e){} }, 15000);
         function checkAuth() {
             if (localStorage.getItem('tg_logged_in') === 'true') {
                 AUTH_KEY = 'fe570f573d2840308f6a298daa3ad4a0';
@@ -878,6 +910,105 @@
             reader.readAsText(file);
         }
 
+        
+        const MAX_BATCH = 300;
+        let usernameQueue = [];
+        let queueTotalAll = 0;
+        let queueDoneAll = 0;
+        let queueBatchNo = 0;
+
+        let batchRunning = false;
+
+        
+        async function refreshBotWorkStatus() {
+            try {
+                const d = await apiCall('/api/bots/work_status');
+                const s = d.summary || {};
+                const bots = d.bots || [];
+                window._botRows = bots;
+                let used = 0;
+                bots.forEach(b => { used += (b.daily_used || 0); });
+                const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+                set('dsWork', s.work != null ? s.work : '-');
+                set('dsCool', s.cooldown != null ? s.cooldown : '-');
+                set('dsCapped', s.daily_capped != null ? s.daily_capped : '-');
+                set('dsToday', used);
+                const el = document.getElementById('botWorkStatus');
+                if (el) {
+                    el.textContent = '每批≤' + (d.max_batch || 300) + ' · 每号每日≤' + (d.default_daily_limit || 500) +
+                        ' · 工作' + (s.work || 0) + ' · 冷却' + (s.cooldown || 0) + ' · 今日检测' + used;
+                }
+            } catch (e) {
+                const el = document.getElementById('botWorkStatus');
+                if (el) el.textContent = '状态加载失败';
+            }
+        }
+
+        function buildQueueFromInput() {
+            const input = document.getElementById('usernameInput').value.trim();
+            let usernames = input.split(/\n/).map(u => u.trim().replace(/^@/, '')).filter(u => u.length > 0);
+            usernames = [...new Set(usernames.map(u => u.toLowerCase()))];
+            usernameQueue = usernames;
+            return usernames.length;
+        }
+
+        async function startCheckQueued() {
+            if (batchRunning) { showToast('已有批次在跑'); return; }
+            const total = buildQueueFromInput();
+            if (!total) { showToast('请输入用户名'); return; }
+            showToast('队列 '+total+' 个，将自动按每批≤'+MAX_BATCH+' 执行');
+            queueTotalAll = usernameQueue.length;
+            queueDoneAll = 0;
+            queueBatchNo = 0;
+            batchRunning = true;
+            shouldStop = false;
+            document.getElementById('startCheckBtn').classList.add('hidden');
+            document.getElementById('stopCheckBtn').classList.remove('hidden');
+            checkResults = [];
+            let batchNo = 0;
+            while (usernameQueue.length && !shouldStop) {
+                batchNo++; queueBatchNo = batchNo;
+                const batch = usernameQueue.splice(0, MAX_BATCH);
+                showToast('第 '+batchNo+' 批：'+batch.length+' 个，剩余队列 '+usernameQueue.length);
+                await refreshBotWorkStatus();
+                // 无工作号则停
+                const work = (window._botRows||[]).filter(b => b.status==='work');
+                if (!work.length) {
+                    showToast('无可用水军（全在冷却或达每日上限），已停止');
+                    break;
+                }
+                // 把本批写入输入框逻辑改为直接跑 checkUsername 列表
+                isChecking = true;
+                const startIdx = checkResults.length;
+                batch.forEach(u => checkResults.push({username:u, status:'pending', time:null}));
+                updateCheckStats(); if (typeof renderCheckResults==='function') renderCheckResults();
+                renderCheckResults && renderCheckResults();
+                const delay = parseInt(document.getElementById('delayInput').value) || 3000;
+                for (let i = 0; i < batch.length; i++) {
+                    if (shouldStop) break;
+                    await checkUsername(batch[i], startIdx + i);
+                    // 若本条 flood → 全局停（checkUsername 内应设 shouldStop）
+                    const r = checkResults[startIdx + i];
+                    if (r && (r.status === 'flood' || (r.error && String(r.error).includes('FloodWait')))) {
+                        shouldStop = true;
+                        showToast('检测到限流，已全局停止；该号已入冷却仓');
+                        break;
+                    }
+                    if (i + 1 < batch.length) await sleep(delay);
+                }
+                await refreshBotWorkStatus();
+                if (shouldStop) break;
+                // 批间休息
+                if (usernameQueue.length) await sleep(5000);
+            }
+            batchRunning = false;
+            isChecking = false;
+            document.getElementById('startCheckBtn').classList.remove('hidden');
+            document.getElementById('stopCheckBtn').classList.add('hidden');
+            showToast(shouldStop ? '已停止（限流或手动）' : '队列全部完成');
+            updateCheckStats();
+        }
+
         async function startCheck() {
             const input = document.getElementById('usernameInput').value.trim();
             if (!input) { showToast('请输入用户名'); return; }
@@ -926,37 +1057,71 @@
             if (!shouldStop) showToast('检测完成！');
         }
 
+        
         async function checkUsername(username, index) {
+            if (!checkResults[index]) {
+                checkResults[index] = { username: username, status: 'pending', time: null };
+            }
             checkResults[index].status = 'checking';
+            try { updateCheckStats(); if (typeof renderCheckResults === 'function') renderCheckResults(); } catch (e) {}
             try {
-                const data = await apiCall('/api/check/one', 'POST', { username });
+                const data = await apiCall('/api/check/one', 'POST', { username: username });
+                if (!data) throw new Error('空响应');
                 checkResults[index].status = data.status || 'error';
                 checkResults[index].premium = !!data.premium;
-                if (data.error) checkResults[index].error = data.error;
-                if (data.first_name) checkResults[index].first_name = data.first_name;
-            } catch (err) {
+                checkResults[index].collect = !!data.collect;
+                checkResults[index].is_ad = !!data.is_ad;
+                checkResults[index].is_spam = !!data.is_spam;
+                checkResults[index].error = data.error || null;
+                if (data.status === 'flood' || (data.error && String(data.error).indexOf('FloodWait') >= 0)) {
+                    shouldStop = true;
+                }
+                if (data.premium) {
+                    try { await apiCall('/api/premium/result', 'POST', { premium: [data] }); } catch (e) {}
+                }
+                if (data.collect || data.status === 'clean') {
+                    try { await apiCall('/api/targets/result', 'POST', { targets: [data] }); } catch (e) {}
+                }
+            } catch (e) {
                 checkResults[index].status = 'error';
-                checkResults[index].error = err.message || '检测失败';
+                checkResults[index].error = (e && e.message) ? e.message : String(e);
+                if (typeof isNetworkErrorMessage === 'function' && isNetworkErrorMessage(checkResults[index].error)) {
+                    if (typeof pauseForNetwork === 'function') pauseForNetwork(checkResults[index].error);
+                    shouldStop = true;
+                }
             }
-            checkResults[index].time = new Date().toLocaleTimeString();
+            try { updateCheckStats(); if (typeof renderCheckResults === 'function') renderCheckResults(); } catch (e) {}
         }
 
         function stopCheck() { shouldStop = true; isChecking = false; document.getElementById('startCheckBtn').classList.remove('hidden'); document.getElementById('stopCheckBtn').classList.add('hidden'); showToast('已停止'); }
-        function clearCheck() { checkResults = []; document.getElementById('usernameInput').value = ''; document.getElementById('progressBar').classList.remove('active'); document.getElementById('checkStats').style.display = 'none'; document.getElementById('checkResultsSection').style.display = 'none'; updateCheckStats(); }
+        function clearCheck() { checkResults = []; document.getElementById('usernameInput').value = ''; document.getElementById('progressBar').classList.remove('active'); document.getElementById('checkStats').style.display = 'grid'; document.getElementById('checkResultsSection').style.display = 'none'; updateCheckStats(); }
 
         function updateCheckStats() {
-            const set = (id, val) => {
-                const el = document.getElementById(id);
-                if (el) el.textContent = val;
-            };
-            set('checkTotal', checkResults.length);
-            set('checkAvailable', checkResults.filter(r => r.status === 'clean' || r.collect === true).length);
-            set('checkTaken', checkResults.filter(r => r.status === 'clean' || r.collect === true).length);
-            set('checkPremium', checkResults.filter(r => !!r.premium).length);
-            const premiumEl = document.getElementById('checkPremium');
-            if (premiumEl) premiumEl.textContent = checkResults.filter(r => !!r.premium).length;
-            set('checkDeleted', checkResults.filter(r => r.status === 'deleted').length);
-            set('checkPending', checkResults.filter(r => r.status === 'checking' || r.status === 'pending').length);
+            const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+            const list = checkResults || [];
+            const remain = (typeof usernameQueue !== 'undefined' && usernameQueue) ? usernameQueue.length : 0;
+            // 本批：当前 list 里 pending+checking；或整表长度在首批
+            const working = list.filter(r => r.status === 'checking' || r.status === 'pending').length;
+            const batchSize = list.length;
+            let totalAll = (typeof queueTotalAll === 'number') ? queueTotalAll : 0;
+            if (!totalAll) totalAll = batchSize + remain;
+            set('checkTotal', totalAll);
+            set('checkBatch', working || batchSize);
+            set('checkRemain', remain);
+            set('checkAvailable', list.filter(r => r.status === 'clean' || r.collect === true).length);
+            set('checkPremium', list.filter(r => !!r.premium).length);
+            set('checkDeleted', list.filter(r => r.status === 'deleted').length);
+            set('checkPending', working);
+            const tip = document.getElementById('queueTip');
+            if (tip) {
+                tip.textContent = '总导入 ' + totalAll + ' · 本批工作 ' + (working || batchSize) + ' · 队列剩余 ' + remain +
+                    (queueBatchNo ? (' · 第' + queueBatchNo + '批') : '');
+            }
+            const bar = document.getElementById('progressBarInner');
+            if (bar && totalAll > 0) {
+                const finished = Math.max(0, totalAll - remain - working);
+                bar.style.width = Math.min(100, Math.round(finished * 100 / totalAll)) + '%';
+            }
         }
 
         function statusLabel(status, premium) {
@@ -1315,6 +1480,7 @@
             document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
             document.getElementById('tab-' + tabName).classList.add('active');
             if (tabName === 'premium') loadPremiumList();
+            if (tabName === 'check') try{refreshBotWorkStatus();}catch(e){}
         }
 
         document.querySelectorAll('.tab').forEach(tab => {

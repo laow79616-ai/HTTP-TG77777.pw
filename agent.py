@@ -21,6 +21,11 @@ app = Flask(__name__)
 AUTH_KEY = "fe570f573d2840308f6a298daa3ad4a0"
 API_POOL_FILE = "/root/bot_agent/api_pool.json"
 PROXY_POOL_FILE = "/root/bot_agent/proxy_pool.json"
+COOLDOWN_FILE = "/root/bot_agent/bot_cooldown.json"
+DAILY_STATS_FILE = "/root/bot_agent/bot_daily_stats.json"
+DEFAULT_DAILY_LIMIT = 500
+MAX_BATCH_SIZE = 300
+
 LOGIN_USER = "admin"
 LOGIN_PASS = "Ab123456987"
 CONFIG_FILE = "/root/bot_agent/config.json"
@@ -284,6 +289,98 @@ def parse_proxy(proxy_url):
     except Exception as e:
         print("parse_proxy error", proxy_url, e)
         return None
+
+
+
+def load_cooldown():
+    import json, os, time
+    if not os.path.exists(COOLDOWN_FILE):
+        return {}
+    try:
+        data = json.load(open(COOLDOWN_FILE))
+    except Exception:
+        return {}
+    now = time.time()
+    # 清过期
+    data = {k: v for k, v in data.items() if float(v.get("until", 0) or 0) > now}
+    return data
+
+def save_cooldown(data):
+    import json
+    json.dump(data, open(COOLDOWN_FILE, "w"), ensure_ascii=False, indent=2)
+
+def set_bot_cooldown(bot_key, seconds, reason="FloodWait"):
+    import time
+    data = load_cooldown()
+    until = time.time() + max(int(seconds), 60)
+    data[str(bot_key)] = {"until": until, "reason": reason, "seconds": int(seconds)}
+    save_cooldown(data)
+    return until
+
+def is_bot_cooling(bot_key):
+    import time
+    data = load_cooldown()
+    item = data.get(str(bot_key))
+    if not item:
+        return False, 0
+    left = float(item.get("until", 0)) - time.time()
+    return left > 0, max(int(left), 0)
+
+def load_daily_stats():
+    import json, os, datetime
+    today = datetime.date.today().isoformat()
+    if not os.path.exists(DAILY_STATS_FILE):
+        return {"date": today, "counts": {}}
+    try:
+        data = json.load(open(DAILY_STATS_FILE))
+    except Exception:
+        return {"date": today, "counts": {}}
+    if data.get("date") != today:
+        return {"date": today, "counts": {}}
+    return data
+
+def save_daily_stats(data):
+    import json
+    json.dump(data, open(DAILY_STATS_FILE, "w"), ensure_ascii=False, indent=2)
+
+def incr_bot_daily(bot_key):
+    data = load_daily_stats()
+    k = str(bot_key)
+    data.setdefault("counts", {})
+    data["counts"][k] = int(data["counts"].get(k, 0)) + 1
+    save_daily_stats(data)
+    return data["counts"][k]
+
+def bot_daily_left(bot_key, limit=None):
+    limit = int(limit or DEFAULT_DAILY_LIMIT)
+    data = load_daily_stats()
+    used = int(data.get("counts", {}).get(str(bot_key), 0))
+    return max(limit - used, 0), used, limit
+
+def list_workable_bots(config=None):
+    """未冷却且未超每日上限的水军"""
+    if config is None:
+        config = load_config()
+    bots = config.get("bots") or []
+    out = []
+    for b in bots:
+        key = b.get("id") or b.get("phone") or b.get("session_path")
+        cooling, left = is_bot_cooling(key)
+        if cooling:
+            b = dict(b)
+            b["_status"] = "cooldown"
+            b["_cooldown_left"] = left
+            continue
+        remain, used, limit = bot_daily_left(key)
+        if remain <= 0:
+            continue
+        bb = dict(b)
+        bb["_status"] = "work"
+        bb["_daily_used"] = used
+        bb["_daily_left"] = remain
+        bb["_daily_limit"] = limit
+        out.append(bb)
+    return out
 
 
 def require_auth(f):
@@ -840,8 +937,176 @@ def api_check_usernames():
     except Exception as e:
         return jsonify({"error": f"检测失败: {str(e)}"}), 500
 
+
 @app.route('/api/check/one', methods=['POST'])
 @require_auth
+def api_check_one():
+    """检测单个用户名：只用水军工作池；FloodWait 写入冷却仓；尊重每日上限"""
+    import time, asyncio
+    data = request.json or {}
+    username = (data.get('username') or '').strip().lstrip('@')
+    if not username:
+        return jsonify({"error": "请提供用户名", "status": "error", "username": ""}), 400
+
+    config = load_config()
+    workable = list_workable_bots(config)
+    if not workable:
+        # 区分全冷却 / 全日额满
+        all_bots = config.get('bots') or []
+        any_cool = False
+        for b in all_bots:
+            key = b.get('id') or b.get('phone') or ''
+            cool, left = is_bot_cooling(key)
+            if cool:
+                any_cool = True
+                break
+        msg = "全部水军冷却中或已达每日上限" if any_cool or all_bots else "无可用水军账号"
+        return jsonify({
+            "username": username,
+            "status": "flood" if any_cool else "error",
+            "error": msg,
+            "premium": False,
+            "collect": False,
+        })
+
+    # 最多试 3 个工作号
+    last_err = None
+    max_try = min(3, len(workable))
+    # 简单轮询：按 daily_used 少的优先
+    workable = sorted(workable, key=lambda b: int(b.get('_daily_used') or 0))
+
+    for i in range(max_try):
+        bot = workable[i]
+        bot_key = bot.get('id') or bot.get('phone') or bot.get('session_path')
+        sp = bot.get('session_path')
+        if not sp:
+            continue
+        try:
+            api_id = int(bot.get('api_id') or 31034207)
+            api_hash = str(bot.get('api_hash') or '')
+            if not api_hash:
+                continue
+
+            async def _run():
+                from telethon import TelegramClient
+                from telethon.tl.functions.contacts import ResolveUsernameRequest
+                from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError, FloodWaitError
+                client = TelegramClient(sp, api_id, api_hash, loop=_loop)
+                try:
+                    await asyncio.wait_for(client.connect(), timeout=8)
+                    if not await client.is_user_authorized():
+                        return {"username": username, "status": "error", "error": "session未授权", "premium": False, "collect": False, "_bot": bot_key}
+                    try:
+                        result = await asyncio.wait_for(client(ResolveUsernameRequest(username)), timeout=8)
+                    except FloodWaitError as e:
+                        return {"username": username, "status": "flood", "error": f"FloodWait {e.seconds}s", "premium": False, "collect": False, "_flood_seconds": int(e.seconds), "_bot": bot_key}
+                    except UsernameNotOccupiedError:
+                        return {"username": username, "status": "available", "premium": False, "collect": False, "_bot": bot_key}
+                    except UsernameInvalidError:
+                        return {"username": username, "status": "invalid", "premium": False, "collect": False, "_bot": bot_key}
+
+                    users = list(getattr(result, 'users', None) or [])
+                    chats = list(getattr(result, 'chats', None) or [])
+                    if users:
+                        user = users[0]
+                        if getattr(user, 'deleted', False):
+                            return {"username": username, "status": "deleted", "premium": False, "collect": False, "_bot": bot_key}
+                        is_premium = bool(getattr(user, 'premium', False))
+                        is_bot = bool(getattr(user, 'bot', False))
+                        fn = getattr(user, 'first_name', '') or ''
+                        ln = getattr(user, 'last_name', '') or ''
+                        ad = is_ad_account(username, fn, ln) if 'is_ad_account' in globals() else False
+                        bot_like = (is_bot_like_username(username) if 'is_bot_like_username' in globals() else False) or is_bot
+                        # 在线粗分
+                        st_obj = getattr(user, 'status', None)
+                        st_name = type(st_obj).__name__ if st_obj is not None else ''
+                        inactive = st_name in ('UserStatusEmpty', 'UserStatusOffline') and False
+                        # 若有 classify_last_online 则用
+                        if 'classify_last_online' in dir() or 'classify_last_online' in globals():
+                            try:
+                                online_flag, inactive = classify_last_online(user)
+                            except Exception:
+                                inactive = st_name in ('UserStatusLastMonth', 'UserStatusEmpty')
+                        if ad:
+                            st = 'ad'
+                            collect = False
+                        elif bot_like:
+                            st = 'spam'
+                            collect = False
+                        elif inactive:
+                            st = 'inactive'
+                            collect = False
+                        else:
+                            st = 'clean'
+                            collect = True
+                        return {
+                            "username": username,
+                            "status": st,
+                            "premium": is_premium,
+                            "collect": collect,
+                            "is_ad": ad,
+                            "is_spam": bot_like,
+                            "first_name": fn,
+                            "last_name": ln,
+                            "user_id": getattr(user, 'id', None),
+                            "online": st_name,
+                            "_bot": bot_key,
+                        }
+                    if chats:
+                        return {"username": username, "status": "unavailable", "premium": False, "collect": False, "entity_type": type(chats[0]).__name__, "_bot": bot_key}
+                    return {"username": username, "status": "unavailable", "premium": False, "collect": False, "_bot": bot_key}
+                finally:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+
+            out = run_async(_run())
+            if not out:
+                last_err = "empty result"
+                continue
+
+            # FloodWait → 冷却仓，换号或返回
+            if out.get('status') == 'flood' or (out.get('error') or '').startswith('FloodWait'):
+                sec = int(out.get('_flood_seconds') or 0)
+                if not sec:
+                    # 从 error 文本解析
+                    import re as _re
+                    m = _re.search(r'(\d+)\s*s', str(out.get('error') or ''))
+                    sec = int(m.group(1)) if m else 3600
+                set_bot_cooldown(bot_key, sec, reason=out.get('error') or 'FloodWait')
+                last_err = out.get('error')
+                # 尝试下一个工作号
+                continue
+
+            # 成功占用一次每日额度（含 clean/ad/spam/deleted 等有效响应）
+            if out.get('status') not in ('error',):
+                try:
+                    incr_bot_daily(bot_key)
+                except Exception:
+                    pass
+
+            # 去掉内部字段
+            out.pop('_bot', None)
+            out.pop('_flood_seconds', None)
+            return jsonify(out)
+
+        except Exception as e:
+            last_err = str(e)[:160]
+            # session 类错误不整池冷却，仅换号
+            continue
+
+    # 全部尝试失败
+    return jsonify({
+        "username": username,
+        "status": "error",
+        "error": last_err or "水军未授权或session失效",
+        "premium": False,
+        "collect": False,
+    })
+
+
+
 def api_check_one():
     """检测单个用户名：最多试3个水军，单号8秒超时，FloodWait自动冷却"""
     import time
@@ -1246,6 +1511,50 @@ def api_clear_blacklist():
 # ============ 统计接口 ============
 
 # ============ 状态接口（兼容前端） ============
+
+@app.route('/api/bots/work_status', methods=['GET'])
+@require_auth
+def api_bots_work_status():
+    import time
+    config = load_config()
+    bots = config.get("bots") or []
+    cd = load_cooldown()
+    daily = load_daily_stats()
+    rows = []
+    work = 0
+    cool = 0
+    capped = 0
+    for b in bots:
+        key = str(b.get("id") or b.get("phone") or "")
+        cooling, left = is_bot_cooling(key)
+        remain, used, limit = bot_daily_left(key)
+        if cooling:
+            st = "cooldown"
+            cool += 1
+        elif remain <= 0:
+            st = "daily_capped"
+            capped += 1
+        else:
+            st = "work"
+            work += 1
+        rows.append({
+            "id": key,
+            "phone": b.get("phone"),
+            "name": b.get("name"),
+            "status": st,
+            "cooldown_left": left if cooling else 0,
+            "daily_used": used,
+            "daily_left": remain,
+            "daily_limit": limit,
+        })
+    return jsonify({
+        "bots": rows,
+        "summary": {"work": work, "cooldown": cool, "daily_capped": capped, "total": len(rows)},
+        "max_batch": MAX_BATCH_SIZE,
+        "default_daily_limit": DEFAULT_DAILY_LIMIT,
+    })
+
+
 @app.route('/api/status', methods=['GET'])
 @require_auth
 def api_status():
