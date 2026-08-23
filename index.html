@@ -741,7 +741,7 @@
                         <span class="bot-status ${bot.status}"><span class="bot-status-dot"></span>${bot.status === 'running' ? '运行中' : '已停止'}</span>
                     </div>
                     <div class="bot-card-info">
-                        <p>水军编号: ${bot.name}</p>
+                        <p>水军编号: ${bot.name}</div><div style="font-size:12px;opacity:.9;margin-top:4px">手机: ${bot.phone || "-"}</p>
                     </div>
                     <div class="bot-card-actions">
                         ${bot.status === 'running' 
@@ -991,7 +991,7 @@
                     const r = checkResults[startIdx + i];
                     if (r && (r.status === 'flood' || (r.error && String(r.error).includes('FloodWait')))) {
                         shouldStop = true;
-                        showToast('检测到限流，已全局停止；该号已入冷却仓');
+                        showToast('某号限流已换号，继续检测；该号已入冷却仓');
                         break;
                     }
                     if (i + 1 < batch.length) await sleep(delay);
@@ -1058,37 +1058,72 @@
         }
 
         
+        
         async function checkUsername(username, index) {
             if (!checkResults[index]) {
                 checkResults[index] = { username: username, status: 'pending', time: null };
             }
             checkResults[index].status = 'checking';
             try { updateCheckStats(); if (typeof renderCheckResults === 'function') renderCheckResults(); } catch (e) {}
-            try {
-                const data = await apiCall('/api/check/one', 'POST', { username: username });
-                if (!data) throw new Error('空响应');
-                checkResults[index].status = data.status || 'error';
-                checkResults[index].premium = !!data.premium;
-                checkResults[index].collect = !!data.collect;
-                checkResults[index].is_ad = !!data.is_ad;
-                checkResults[index].is_spam = !!data.is_spam;
-                checkResults[index].error = data.error || null;
-                if (data.status === 'flood' || (data.error && String(data.error).indexOf('FloodWait') >= 0)) {
-                    shouldStop = true;
+
+            var maxRetry = 3;
+            var lastErr = null;
+            for (var attempt = 0; attempt < maxRetry; attempt++) {
+                if (typeof shouldStop !== 'undefined' && shouldStop) break;
+                try {
+                    var data = await apiCall('/api/check/one', 'POST', { username: username });
+                    if (!data) throw new Error('空响应');
+
+                    var errStr = String(data.error || '');
+                    // 只有整池不可用才全局停
+                    if (errStr.indexOf('无可用水军') >= 0 || errStr.indexOf('全部') >= 0 && errStr.indexOf('冷却') >= 0) {
+                        checkResults[index].status = 'error';
+                        checkResults[index].error = errStr;
+                        shouldStop = true;
+                        if (typeof showToast === 'function') showToast(errStr);
+                        break;
+                    }
+
+                    // 单号 FloodWait：不 shouldStop，换号重试
+                    if (data.status === 'flood' || errStr.indexOf('FloodWait') >= 0) {
+                        lastErr = errStr || 'FloodWait';
+                        checkResults[index].error = lastErr + '（换号重试 ' + (attempt + 1) + '/' + maxRetry + '）';
+                        try { if (typeof refreshBotWorkStatus === 'function') refreshBotWorkStatus(); } catch (e) {}
+                        await sleep(1000);
+                        continue;
+                    }
+
+                    checkResults[index].status = data.status || 'error';
+                    checkResults[index].premium = !!data.premium;
+                    checkResults[index].collect = !!data.collect;
+                    checkResults[index].is_ad = !!data.is_ad;
+                    checkResults[index].is_spam = !!data.is_spam;
+                    checkResults[index].error = data.error || null;
+
+                    if (data.premium) {
+                        try { await apiCall('/api/premium/result', 'POST', { premium: [data] }); } catch (e) {}
+                    }
+                    if (data.collect || data.status === 'clean') {
+                        try { await apiCall('/api/targets/result', 'POST', { targets: [data] }); } catch (e) {}
+                    }
+                    lastErr = null;
+                    break;
+                } catch (e) {
+                    lastErr = (e && e.message) ? e.message : String(e);
+                    if (typeof isNetworkErrorMessage === 'function' && isNetworkErrorMessage(lastErr)) {
+                        checkResults[index].status = 'error';
+                        checkResults[index].error = lastErr;
+                        if (typeof pauseForNetwork === 'function') pauseForNetwork(lastErr);
+                        shouldStop = true;
+                        break;
+                    }
+                    await sleep(600);
                 }
-                if (data.premium) {
-                    try { await apiCall('/api/premium/result', 'POST', { premium: [data] }); } catch (e) {}
-                }
-                if (data.collect || data.status === 'clean') {
-                    try { await apiCall('/api/targets/result', 'POST', { targets: [data] }); } catch (e) {}
-                }
-            } catch (e) {
+            }
+            if (lastErr && (checkResults[index].status === 'checking' || checkResults[index].status === 'pending')) {
                 checkResults[index].status = 'error';
-                checkResults[index].error = (e && e.message) ? e.message : String(e);
-                if (typeof isNetworkErrorMessage === 'function' && isNetworkErrorMessage(checkResults[index].error)) {
-                    if (typeof pauseForNetwork === 'function') pauseForNetwork(checkResults[index].error);
-                    shouldStop = true;
-                }
+                checkResults[index].error = lastErr;
+                // 单条最终失败也不全局停
             }
             try { updateCheckStats(); if (typeof renderCheckResults === 'function') renderCheckResults(); } catch (e) {}
         }
@@ -1474,7 +1509,67 @@
         }
 
         // ==================== Utilities ====================
+        
+        
+        
+        async function paintBotPhones() {
+            try {
+                var d = await apiCall('/api/bots/work_status');
+                var bots = d.bots || [];
+                var byName = {}, byPhone = {}, byId = {};
+                bots.forEach(function (b) {
+                    if (b.name != null) byName[String(b.name)] = b;
+                    if (b.phone) byPhone[String(b.phone)] = b;
+                    if (b.id) byId[b.id] = b;
+                });
+                var cards = document.querySelectorAll('.bot-card, .soldier-card, [class*="bot-card"], .bots-grid > div, .bot-list > div');
+                if (!cards.length) {
+                    // 兜底：含「水军编号」的块
+                    document.querySelectorAll('div').forEach(function (el) {
+                        var t = el.innerText || '';
+                        if (/水军编号/.test(t) && t.length < 280 && el.querySelector('button')) cards = (cards.length ? cards : []);
+                    });
+                    var list = [];
+                    document.querySelectorAll('div').forEach(function (el) {
+                        var t = el.innerText || '';
+                        if (t.indexOf('水军编号') >= 0 && el.querySelector('button') && t.length < 320) list.push(el);
+                    });
+                    cards = list;
+                }
+                cards.forEach(function (card) {
+                    var text = card.innerText || '';
+                    var b = null;
+                    var m = text.match(/水军编号[：:]\s*(\S+)/);
+                    if (m) b = byName[m[1]];
+                    if (!b) {
+                        for (var ph in byPhone) {
+                            if (text.indexOf(ph) >= 0) { b = byPhone[ph]; break; }
+                        }
+                    }
+                    if (!b) {
+                        // 卡片大标题数字
+                        var h = card.querySelector('h3,h4,.title,div');
+                        if (h) {
+                            var n = String(h.textContent || '').trim();
+                            if (byName[n]) b = byName[n];
+                        }
+                    }
+                    if (!b || !b.phone) return;
+                    var old = card.querySelector('.bot-phone-line');
+                    if (old) { old.textContent = '手机: ' + b.phone; return; }
+                    var line = document.createElement('div');
+                    line.className = 'bot-phone-line';
+                    line.style.cssText = 'font-size:12px;opacity:.9;margin:6px 0;word-break:break-all;color:#90caf9;';
+                    line.textContent = '手机: ' + b.phone;
+                    var btn = card.querySelector('button');
+                    if (btn) card.insertBefore(line, btn);
+                    else card.appendChild(line);
+                });
+            } catch (e) { console.error('paintBotPhones', e); }
+        }
+
         function switchTab(tabName) {
+            if (tabName === 'bots' || tabName === 'bot') { try { paintBotPhones(); } catch (e) {} }
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');

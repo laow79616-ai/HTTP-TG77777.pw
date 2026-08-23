@@ -672,6 +672,10 @@ def api_verify_code():
             "type": "userbot",
             "added_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
+        phone_norm = str(new_bot.get("phone") or "").strip()
+        for _b in config.get("bots") or []:
+            if str(_b.get("phone") or "").strip() == phone_norm and phone_norm:
+                return jsonify({"error": "该手机号已存在，请勿重复添加", "phone": phone_norm}), 400
         config.setdefault('bots', []).append(new_bot)
         save_config(config)
         
