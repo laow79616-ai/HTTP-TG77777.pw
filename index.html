@@ -268,6 +268,7 @@
             <div class="tab" data-tab="add-bot">增加水军</div>
             <div class="tab" data-tab="check">批量检测</div>
             <!-- premium tab removed: use batch check -->
+            <div class="tab" data-tab="pool">资源池</div>
             <div class="tab" data-tab="keyword">关键词筛选</div>
         </div>
 
@@ -526,7 +527,35 @@
         </div>
 
         <!-- Tab: Keyword -->
-        <div class="tab-content" id="tab-keyword">
+        <div class="tab-content" 
+        <div id="tab-pool" class="tab-content" style="display:none;">
+            <h3 style="margin-top:0;">资源池 · API / 代理</h3>
+            <p style="font-size:13px;opacity:.75;">数据文件：api_pool.json / proxy_pool.json（服务器上不会丢）</p>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+                <div style="border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:14px;">
+                    <h4>API 池 <span id="poolApiCount"></span></h4>
+                    <textarea id="poolApiInput" rows="5" placeholder="每行: api_id-api_hash 或 api_id:api_hash" style="width:100%;box-sizing:border-box;"></textarea>
+                    <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;">
+                        <button type="button" class="btn btn-primary" onclick="addPoolApiBatch()">批量添加 API</button>
+                        <button type="button" class="btn btn-secondary" onclick="loadPoolApi()">刷新</button>
+                        <button type="button" class="btn btn-warning" onclick="redistributePoolApi()">一键均匀分配API</button>
+                    </div>
+                    <div id="poolApiList" style="margin-top:10px;max-height:260px;overflow:auto;font-size:12px;"></div>
+                </div>
+                <div style="border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:14px;">
+                    <h4>代理 IP 池 <span id="poolProxyCount"></span></h4>
+                    <textarea id="poolProxyInput" rows="5" placeholder="每行: ip:port:user:pass" style="width:100%;box-sizing:border-box;"></textarea>
+                    <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;">
+                        <button type="button" class="btn btn-primary" onclick="addPoolProxyBatch()">批量添加代理</button>
+                        <button type="button" class="btn btn-secondary" onclick="loadPoolProxy()">刷新</button>
+                        <button type="button" class="btn btn-warning" onclick="redistributePoolProxy()">一键均匀分配代理</button>
+                    </div>
+                    <div id="poolProxyList" style="margin-top:10px;max-height:260px;overflow:auto;font-size:12px;"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="tab-keyword">
             <div class="card">
                 <h3>关键词过滤</h3>
                 <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">输入关键词直接从检测结果中删除包含该关键词的用户名，并永久记录，下次检测自动过滤</p>
@@ -572,6 +601,65 @@
         // ==================== Auth ====================
         const VALID_USER = 'admin';
         const VALID_PASS = 'Ab123456987';
+
+        
+        async function loadPoolApi() {
+            try {
+                const d = await apiCall('/api/pool/api');
+                const pool = d.pool || [];
+                const n = document.getElementById('poolApiCount');
+                if (n) n.textContent = '(' + pool.length + ')';
+                const el = document.getElementById('poolApiList');
+                if (el) el.innerHTML = pool.map(x => '<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06);">' + (x.label || x.api_id) + ' · ' + x.api_id + '</div>').join('') || '空';
+            } catch (e) { showToast('加载API池失败: ' + e.message); }
+        }
+        async function loadPoolProxy() {
+            try {
+                const d = await apiCall('/api/pool/proxy');
+                const pool = d.pool || [];
+                const n = document.getElementById('poolProxyCount');
+                if (n) n.textContent = '(' + pool.length + ')';
+                const el = document.getElementById('poolProxyList');
+                if (el) el.innerHTML = pool.map(x => {
+                    const s = typeof x === 'string' ? x : (x.proxy || x.url || '');
+                    return '<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06);">' + s + '</div>';
+                }).join('') || '空';
+            } catch (e) { showToast('加载代理池失败: ' + e.message); }
+        }
+        async function addPoolApiBatch() {
+            const raw = (document.getElementById('poolApiInput').value || '').trim();
+            if (!raw) { showToast('请输入API'); return; }
+            try {
+                const d = await apiCall('/api/pool/api/batch', 'POST', { text: raw });
+                showToast('API 添加 ' + (d.added || 0) + '，共 ' + (d.total || 0));
+                document.getElementById('poolApiInput').value = '';
+                loadPoolApi();
+            } catch (e) { showToast(e.message); }
+        }
+        async function addPoolProxyBatch() {
+            const raw = (document.getElementById('poolProxyInput').value || '').trim();
+            if (!raw) { showToast('请输入代理'); return; }
+            try {
+                const d = await apiCall('/api/pool/proxy/batch', 'POST', { text: raw, proxies: raw.split(/\n/) });
+                showToast('代理添加 ' + (d.added || 0) + '，共 ' + (d.total || 0));
+                document.getElementById('poolProxyInput').value = '';
+                loadPoolProxy();
+            } catch (e) { showToast(e.message); }
+        }
+        async function redistributePoolApi() {
+            if (!confirm('将 API 均匀分配到所有水军？')) return;
+            try {
+                const d = await apiCall('/api/pool/api/redistribute', 'POST', {});
+                showToast(d.message || '完成');
+            } catch (e) { showToast(e.message); }
+        }
+        async function redistributePoolProxy() {
+            if (!confirm('将代理均匀分配到所有水军？')) return;
+            try {
+                const d = await apiCall('/api/pool/proxy/redistribute', 'POST', {});
+                showToast(d.message || '完成');
+            } catch (e) { showToast(e.message); }
+        }
 
         function doLogin() {
             const username = document.getElementById('loginUsername').value.trim();
@@ -1569,6 +1657,7 @@
         }
 
         function switchTab(tabName) {
+            if (tabName === 'pool') { try { loadPoolApi(); loadPoolProxy(); } catch (e) {} }
             if (tabName === 'bots' || tabName === 'bot') { try { paintBotPhones(); } catch (e) {} }
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
