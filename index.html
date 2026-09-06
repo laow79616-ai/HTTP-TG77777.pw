@@ -236,6 +236,12 @@
         .hidden { display: none !important; }
         .loading { opacity: 0.6; pointer-events: none; }
     </style>
+
+<style id="kw-scope-css">
+.keyword-filter-box { display: none !important; }
+#tab-keyword .keyword-filter-box,
+#tab-keyword [data-kw="1"] { display: block !important; }
+</style>
 </head>
 <body>
     <!-- Login Overlay -->
@@ -556,7 +562,7 @@
         </div>
 
         <div id="tab-keyword">
-            <div class="card">
+            <div class="keyword-filter-box card">
                 <h3>关键词过滤</h3>
                 <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">输入关键词直接从检测结果中删除包含该关键词的用户名，并永久记录，下次检测自动过滤</p>
                 <div class="form-group">
@@ -1078,8 +1084,7 @@
                     // 若本条 flood → 全局停（checkUsername 内应设 shouldStop）
                     const r = checkResults[startIdx + i];
                     if (r && (r.status === 'flood' || (r.error && String(r.error).includes('FloodWait')))) {
-                        shouldStop = true;
-                        showToast('某号限流已换号，继续检测；该号已入冷却仓');
+                        shouldStop = false; showToast('限流，1分钟后继续'); await waitAndResumeCheck('限流');;
                         break;
                     }
                     if (i + 1 < batch.length) await sleep(delay);
@@ -1147,6 +1152,7 @@
 
         
         
+        
         async function checkUsername(username, index) {
             if (!checkResults[index]) {
                 checkResults[index] = { username: username, status: 'pending', time: null };
@@ -1154,30 +1160,25 @@
             checkResults[index].status = 'checking';
             try { updateCheckStats(); if (typeof renderCheckResults === 'function') renderCheckResults(); } catch (e) {}
 
-            var maxRetry = 3;
+            var maxRetry = 4;
             var lastErr = null;
             for (var attempt = 0; attempt < maxRetry; attempt++) {
-                if (typeof shouldStop !== 'undefined' && shouldStop) break;
+                if (typeof shouldStop !== 'undefined' && shouldStop && !floodPause) break;
                 try {
                     var data = await apiCall('/api/check/one', 'POST', { username: username });
                     if (!data) throw new Error('空响应');
+                    var errStr = String(data.error || data.status || '');
 
-                    var errStr = String(data.error || '');
-                    // 只有整池不可用才全局停
-                    if (errStr.indexOf('无可用水军') >= 0 || errStr.indexOf('全部') >= 0 && errStr.indexOf('冷却') >= 0) {
-                        checkResults[index].status = 'error';
-                        checkResults[index].error = errStr;
-                        shouldStop = true;
-                        if (typeof showToast === 'function') showToast(errStr);
-                        break;
-                    }
+                    var isFlood = (data.status === 'flood') || errStr.indexOf('FloodWait') >= 0 || errStr.indexOf('限流') >= 0;
+                    var isAuth = errStr.indexOf('未授权') >= 0 || errStr.indexOf('session') >= 0;
+                    var isNet = errStr.indexOf('fetch') >= 0 || errStr.indexOf('Network') >= 0 || errStr.indexOf('Failed') >= 0;
 
-                    // 单号 FloodWait：不 shouldStop，换号重试
-                    if (data.status === 'flood' || errStr.indexOf('FloodWait') >= 0) {
-                        lastErr = errStr || 'FloodWait';
-                        checkResults[index].error = lastErr + '（换号重试 ' + (attempt + 1) + '/' + maxRetry + '）';
-                        try { if (typeof refreshBotWorkStatus === 'function') refreshBotWorkStatus(); } catch (e) {}
-                        await sleep(1000);
+                    if (isFlood || isAuth || isNet || data.status === 'error') {
+                        lastErr = errStr || 'error';
+                        checkResults[index].error = lastErr + '（等待后重试 ' + (attempt+1) + '/' + maxRetry + '）';
+                        checkResults[index].status = 'checking';
+                        shouldStop = false;
+                        await waitAndResumeCheck(lastErr);
                         continue;
                     }
 
@@ -1187,7 +1188,6 @@
                     checkResults[index].is_ad = !!data.is_ad;
                     checkResults[index].is_spam = !!data.is_spam;
                     checkResults[index].error = data.error || null;
-
                     if (data.premium) {
                         try { await apiCall('/api/premium/result', 'POST', { premium: [data] }); } catch (e) {}
                     }
@@ -1198,20 +1198,13 @@
                     break;
                 } catch (e) {
                     lastErr = (e && e.message) ? e.message : String(e);
-                    if (typeof isNetworkErrorMessage === 'function' && isNetworkErrorMessage(lastErr)) {
-                        checkResults[index].status = 'error';
-                        checkResults[index].error = lastErr;
-                        if (typeof pauseForNetwork === 'function') pauseForNetwork(lastErr);
-                        shouldStop = true;
-                        break;
-                    }
-                    await sleep(600);
+                    shouldStop = false;
+                    await waitAndResumeCheck(lastErr);
                 }
             }
             if (lastErr && (checkResults[index].status === 'checking' || checkResults[index].status === 'pending')) {
                 checkResults[index].status = 'error';
                 checkResults[index].error = lastErr;
-                // 单条最终失败也不全局停
             }
             try { updateCheckStats(); if (typeof renderCheckResults === 'function') renderCheckResults(); } catch (e) {}
         }
@@ -1650,22 +1643,100 @@
                     line.style.cssText = 'font-size:12px;opacity:.9;margin:6px 0;word-break:break-all;color:#90caf9;';
                     line.textContent = '手机: ' + b.phone;
                     var btn = card.querySelector('button');
-                    if (btn) card.insertBefore(line, btn);
-                    else card.appendChild(line);
+                    try { card.appendChild(line); } catch (e1) {}
                 });
             } catch (e) { console.error('paintBotPhones', e); }
         }
 
-        function switchTab(tabName) {
-            if (tabName === 'pool') { try { loadPoolApi(); loadPoolProxy(); } catch (e) {} }
-            if (tabName === 'bots' || tabName === 'bot') { try { paintBotPhones(); } catch (e) {} }
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            document.querySelector(`.tab[data-tab="${tabName}"]`).classList.add('active');
-            document.getElementById('tab-' + tabName).classList.add('active');
-            if (tabName === 'premium') loadPremiumList();
-            if (tabName === 'check') try{refreshBotWorkStatus();}catch(e){}
+        
+        
+        setTimeout(function(){ try{ placeKeywordPanelOnly(); }catch(e){} }, 500);
+        
+        setTimeout(function(){ try{ placeKeywordPanelOnly(); }catch(e){} }, 500);
+        function placeKeywordPanelOnly() {
+            try {
+                var active = document.querySelector('.tab.active');
+                var name = active ? active.getAttribute('data-tab') : '';
+                var nodes = [];
+                document.querySelectorAll('div').forEach(function (el) {
+                    var t = el.innerText || '';
+                    if (t.indexOf('已保存的过滤关键词') >= 0 && t.indexOf('添加过滤关键词') >= 0 && t.indexOf('关键词过滤') >= 0 && t.length < 2200) {
+                        nodes.push(el);
+                    }
+                });
+                // 去掉被包含的子节点
+                nodes = nodes.filter(function (el) {
+                    return !nodes.some(function (o) { return o !== el && o.contains(el); });
+                });
+                var host = document.getElementById('tab-keyword');
+                if (!host) {
+                    host = document.createElement('div');
+                    host.id = 'tab-keyword';
+                    host.className = 'tab-content';
+                    host.style.display = 'none';
+                    (document.getElementById('mainContent') || document.body).appendChild(host);
+                }
+                nodes.forEach(function (el, i) {
+                    if (i === 0 && !host.contains(el)) {
+                        host.appendChild(el);
+                    } else if (i > 0) {
+                        el.style.display = 'none';
+                    }
+                });
+                // 非 keyword 页隐藏 host 内容视觉：host 本身由 switchTab 控制
+                if (name !== 'keyword') {
+                    host.style.display = 'none';
+                    host.classList.remove('active');
+                }
+            } catch (e) { console.error(e); }
         }
+
+        
+        
+        let floodPause = false;
+        async function waitAndResumeCheck(reason) {
+            if (floodPause) return;
+            floodPause = true;
+            shouldStop = false;
+            try { showToast((reason || '限流/错误') + '，1分钟后自动继续'); } catch (e) {}
+            await sleep(60000);
+            floodPause = false;
+            shouldStop = false;
+            try { showToast('已等待1分钟，继续检测'); } catch (e) {}
+        }
+
+        function switchTab(tabName) {
+            try {
+              if (tabName === 'keyword') document.body.classList.add('show-keyword');
+              else document.body.classList.remove('show-keyword');
+            } catch(e) {}
+
+            try {
+                document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
+                document.querySelectorAll('.tab-content').forEach(function (el) {
+                    el.classList.remove('active');
+                    el.style.display = 'none';
+                });
+                var btn = document.querySelector('.tab[data-tab="' + tabName + '"]');
+                if (btn) btn.classList.add('active');
+                var panel = document.getElementById('tab-' + tabName);
+                if (panel) {
+                    panel.classList.add('active');
+                    panel.style.display = 'block';
+                }
+                // 关键词块只在 keyword
+                document.querySelectorAll('.keyword-filter-box').forEach(function (el) {
+                    el.style.setProperty('display', tabName === 'keyword' ? 'block' : 'none', 'important');
+                });
+                if (tabName === 'pool') {
+                    try { loadPoolApi(); loadPoolProxy(); } catch (e) {}
+                }
+                if (tabName === 'check') {
+                    try { if (typeof refreshBotWorkStatus === 'function') refreshBotWorkStatus(); } catch (e) {}
+                }
+            } catch (e) { console.error(e); }
+        }
+
 
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', () => switchTab(tab.dataset.tab));
