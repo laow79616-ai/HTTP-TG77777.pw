@@ -388,6 +388,15 @@ def list_workable_bots_by_ip(config=None):
     return ordered
 
 
+
+def is_bot_selectable(b):
+    st = str(b.get("status") or "").lower()
+    if st in ("need_relogin", "unauth", "unauthorized", "stopped", "stop"):
+        return False
+    if not b.get("session_path"):
+        return False
+    return True
+
 def list_workable_bots(config=None):
     """未冷却且未超每日上限的水军"""
     if config is None:
@@ -395,6 +404,8 @@ def list_workable_bots(config=None):
     bots = config.get("bots") or []
     out = []
     for b in bots:
+        if not is_bot_selectable(b):
+            continue
         key = b.get("id") or b.get("phone") or b.get("session_path")
         cooling, left = is_bot_cooling(key)
         if cooling:
@@ -778,6 +789,85 @@ def api_pool_redistribute():
     save_config(config)
     return jsonify({"success": True, "message": f"已均匀分配 {len(bots)} 个水军", "bots": len(bots), "apis": len(pool)})
 
+
+@app.route('/api/pool/proxy/bind', methods=['POST'])
+@require_auth
+def api_proxy_bind():
+    """把选中的水军绑定到指定代理。不改未选中的号。"""
+    data = request.json or {}
+    proxy = (data.get("proxy") or "").strip()
+    phones = data.get("phones") or data.get("bot_ids") or []
+    if not proxy:
+        return jsonify({"error": "缺少 proxy"}), 400
+    if isinstance(phones, str):
+        phones = [x.strip() for x in re.split(r"[\s,]+", phones) if x.strip()]
+    phones = [str(x).strip() for x in phones if str(x).strip()]
+    config = load_config()
+    changed = 0
+    for b in config.get("bots") or []:
+        ph = str(b.get("phone") or "")
+        bid = str(b.get("id") or "")
+        name = str(b.get("name") or "")
+        if ph in phones or bid in phones or name in phones:
+            b["proxy"] = proxy
+            changed += 1
+    save_config(config)
+    return jsonify({"success": True, "changed": changed, "proxy": proxy, "phones": phones})
+
+@app.route('/api/pool/proxy/item', methods=['POST'])
+@require_auth
+def api_proxy_delete_item():
+    """删除一条代理，不改水军绑定（除非明确 unbind=true）"""
+    data = request.json or {}
+    proxy = (data.get("proxy") or "").strip()
+    unbind = bool(data.get("unbind"))
+    if not proxy:
+        return jsonify({"error": "缺少 proxy"}), 400
+    pool = load_proxy_pool()
+    new_pool = []
+    for x in pool:
+        s = x if isinstance(x, str) else (x.get("proxy") or x.get("url") or "")
+        if s != proxy:
+            new_pool.append(x)
+    save_proxy_pool(new_pool)
+    unbound = 0
+    if unbind:
+        config = load_config()
+        for b in config.get("bots") or []:
+            if str(b.get("proxy") or "") == proxy:
+                b["proxy"] = ""
+                unbound += 1
+        save_config(config)
+    return jsonify({"success": True, "total": len(new_pool), "unbound": unbound})
+
+@app.route('/api/pool/proxy/bindings', methods=['GET'])
+@require_auth
+def api_proxy_bindings():
+    """每条代理 + 全部水军（标注是否已绑定该代理）"""
+    pool = load_proxy_pool()
+    config = load_config()
+    bots = []
+    for i, b in enumerate(config.get("bots") or [], 1):
+        bots.append({
+            "index": i,
+            "id": b.get("id"),
+            "name": b.get("name") or str(i),
+            "phone": b.get("phone") or "",
+            "proxy": b.get("proxy") or "",
+            "status": b.get("status") or "",
+        })
+    items = []
+    for x in pool:
+        if isinstance(x, str):
+            px, label = x, x
+        else:
+            px = x.get("proxy") or x.get("url") or ""
+            label = x.get("label") or px
+        bound = [b for b in bots if (b.get("proxy") or "") == px]
+        items.append({"proxy": px, "label": label, "bound": bound, "bound_count": len(bound)})
+    return jsonify({"success": True, "proxies": items, "bots": bots, "total_proxies": len(items), "total_bots": len(bots)})
+
+
 @app.route('/api/pool/proxy', methods=['GET'])
 @require_auth
 def proxy_pool_list():
@@ -1030,6 +1120,15 @@ def api_check_one():
                 try:
                     await asyncio.wait_for(client.connect(), timeout=8)
                     if not await client.is_user_authorized():
+                        set_bot_cooldown(bot_key, 24*3600, reason="session未授权")
+                        try:
+                            cfg2 = load_config()
+                            for _b in cfg2.get("bots") or []:
+                                if (_b.get("id") or _b.get("phone") or _b.get("session_path")) == bot_key or _b.get("phone") and str(_b.get("phone")) in str(bot_key):
+                                    _b["status"] = "need_relogin"
+                            save_config(cfg2)
+                        except Exception:
+                            pass
                         return {"username": username, "status": "error", "error": "session未授权", "premium": False, "collect": False, "_bot": bot_key}
                     try:
                         result = await asyncio.wait_for(client(ResolveUsernameRequest(username)), timeout=8)

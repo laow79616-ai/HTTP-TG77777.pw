@@ -274,7 +274,8 @@
             <div class="tab" data-tab="add-bot">增加水军</div>
             <div class="tab" data-tab="check">批量检测</div>
             <!-- premium tab removed: use batch check -->
-            <div class="tab" data-tab="pool">资源池</div>
+            <div class="tab" data-tab="pool-api">API资源池</div>
+            <div class="tab" data-tab="pool-ip">IP资源池</div>
             <div class="tab" data-tab="keyword">关键词筛选</div>
         </div>
 
@@ -534,6 +535,18 @@
 
         <!-- Tab: Keyword -->
         <div class="tab-content" 
+        <div 
+        <div id="tab-pool-api" class="tab-content" style="display:none;">
+            <h3 style="margin-top:0;">API 资源池</h3>
+            <p style="font-size:13px;opacity:.75;">数据文件：api_pool.json（服务器上不会丢）</p>
+            <div id="poolApiMount"></div>
+        </div>
+        <div id="tab-pool-ip" class="tab-content" style="display:none;">
+            <h3 style="margin-top:0;">IP 资源池</h3>
+            <p style="font-size:13px;opacity:.75;">数据文件：proxy_pool.json。保存后不自动改已有绑定。</p>
+            <div id="poolIpMount"></div>
+        </div>
+
         <div id="tab-pool" class="tab-content" style="display:none;">
             <h3 style="margin-top:0;">资源池 · API / 代理</h3>
             <p style="font-size:13px;opacity:.75;">数据文件：api_pool.json / proxy_pool.json（服务器上不会丢）</p>
@@ -550,7 +563,7 @@
                 </div>
                 <div style="border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:14px;">
                     <h4>代理 IP 池 <span id="poolProxyCount"></span></h4>
-                    <textarea id="poolProxyInput" rows="5" placeholder="每行: ip:port:user:pass" style="width:100%;box-sizing:border-box;"></textarea>
+                    <textarea id="poolProxyInput" rows="5" placeholder="每行: ip:port:user:pass 或 socks5://user:pass@ip:port（保存后不自动改已有绑定）" style="width:100%;box-sizing:border-box;"></textarea>
                     <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;">
                         <button type="button" class="btn btn-primary" onclick="addPoolProxyBatch()">批量添加代理</button>
                         <button type="button" class="btn btn-secondary" onclick="loadPoolProxy()">刷新</button>
@@ -619,19 +632,83 @@
                 if (el) el.innerHTML = pool.map(x => '<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06);">' + (x.label || x.api_id) + ' · ' + x.api_id + '</div>').join('') || '空';
             } catch (e) { showToast('加载API池失败: ' + e.message); }
         }
+        
+        let poolBotsCache = [];
+        let selectedPhonesByProxy = {};
+
+        function proxyKey(px) { return String(px || ''); }
+
         async function loadPoolProxy() {
             try {
-                const d = await apiCall('/api/pool/proxy');
-                const pool = d.pool || [];
+                let d;
+                try { d = await apiCall('/api/pool/proxy/bindings'); }
+                catch (e) { d = await apiCall('/api/pool/proxy'); }
+                const pool = d.proxies || d.pool || [];
+                poolBotsCache = d.bots || [];
                 const n = document.getElementById('poolProxyCount');
-                if (n) n.textContent = '(' + pool.length + ')';
+                if (n) n.textContent = '(' + (d.total_proxies || pool.length) + ')';
                 const el = document.getElementById('poolProxyList');
-                if (el) el.innerHTML = pool.map(x => {
-                    const s = typeof x === 'string' ? x : (x.proxy || x.url || '');
-                    return '<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06);">' + s + '</div>';
-                }).join('') || '空';
+                if (!el) return;
+                if (!pool.length) { el.innerHTML = '<div style="opacity:.6;padding:8px">暂无代理</div>'; return; }
+                el.innerHTML = pool.map(function (item, idx) {
+                    const px = (typeof item === 'string') ? item : (item.proxy || item.url || '');
+                    const boundSet = {};
+                    (item.bound || []).forEach(function (b) { boundSet[b.phone] = true; });
+                    const sel = selectedPhonesByProxy[px] || {};
+                    const chips = (poolBotsCache || []).map(function (b, i) {
+                        const ph = b.phone || '';
+                        const on = !!(sel[ph] || boundSet[ph]);
+                        const border = on ? '2px solid #22c55e' : '1px solid rgba(255,255,255,.15)';
+                        const bg = on ? 'rgba(34,197,94,.15)' : 'rgba(255,255,255,.04)';
+                        return '<button type="button" class="proxy-chip" data-proxy="'+encodeURIComponent(px)+'" data-phone="'+ph+'" style="border:'+border+';background:'+bg+';color:#e8eef7;border-radius:999px;padding:4px 8px;margin:3px;font-size:12px;cursor:pointer;">'+(b.index || (i+1))+' '+(ph || b.name || '')+'</button>';
+                    }).join('');
+                    const boundCount = (item.bound_count != null) ? item.bound_count : (item.bound || []).length;
+                    return '<div class="proxy-item" style="border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:10px;margin:8px 0;">'
+                        + '<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:6px;">'
+                        + '<span style="flex:0 0 36px;height:36px;line-height:36px;text-align:center;border-radius:10px;background:#3b82f6;color:#fff;font-weight:800;font-size:16px;">'+(idx+1)+'</span>'
+                        + '<div style="font-size:16px;word-break:break-all;opacity:1;line-height:1.45;font-weight:600;letter-spacing:.2px;">'+px+'</div>'
+                        + '</div>'
+                        + '<div style="font-size:11px;opacity:.6;margin-bottom:6px;">第 '+(idx+1)+' 条 / 共 '+pool.length+' 条 · 已绑定 '+boundCount+' 个号</div>'
+                        + '<div class="proxy-chips">'+chips+'</div>'
+                        + '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">'
+                        + '<button type="button" class="btn btn-secondary" onclick="bindSelectedToProxy(decodeURIComponent(\''+encodeURIComponent(px)+'\'))">绑定这些号</button>'
+                        + '<button type="button" class="btn btn-danger" onclick="deleteProxyItem(decodeURIComponent(\''+encodeURIComponent(px)+'\'))">删除</button>'
+                        + '</div></div>';
+                }).join('');
+                el.querySelectorAll('.proxy-chip').forEach(function (btn) {
+                    btn.onclick = function () {
+                        const px = decodeURIComponent(btn.getAttribute('data-proxy') || '');
+                        const ph = btn.getAttribute('data-phone') || '';
+                        if (!selectedPhonesByProxy[px]) selectedPhonesByProxy[px] = {};
+                        if (selectedPhonesByProxy[px][ph]) delete selectedPhonesByProxy[px][ph];
+                        else selectedPhonesByProxy[px][ph] = true;
+                        loadPoolProxy();
+                    };
+                });
             } catch (e) { showToast('加载代理池失败: ' + e.message); }
         }
+
+        async function bindSelectedToProxy(px) {
+            const map = selectedPhonesByProxy[px] || {};
+            const phones = Object.keys(map);
+            if (!phones.length) { showToast('请先点选要绑定的水军号'); return; }
+            try {
+                const d = await apiCall('/api/pool/proxy/bind', 'POST', { proxy: px, phones: phones });
+                showToast('已绑定 ' + (d.changed || 0) + ' 个号到该 IP');
+                selectedPhonesByProxy[px] = {};
+                loadPoolProxy();
+            } catch (e) { showToast(e.message); }
+        }
+
+        async function deleteProxyItem(px) {
+            if (!confirm('删除这条代理？不会自动改其他号的绑定')) return;
+            try {
+                await apiCall('/api/pool/proxy/item', 'POST', { proxy: px, unbind: false });
+                showToast('已删除代理');
+                loadPoolProxy();
+            } catch (e) { showToast(e.message); }
+        }
+
         async function addPoolApiBatch() {
             const raw = (document.getElementById('poolApiInput').value || '').trim();
             if (!raw) { showToast('请输入API'); return; }
@@ -1705,7 +1782,39 @@
             try { showToast('已等待1分钟，继续检测'); } catch (e) {}
         }
 
+        
+        function isolatePoolColumns() {
+            try {
+                var root = document.getElementById('tab-pool');
+                if (!root) return;
+                var grid = root.querySelector('div[style*="grid-template-columns"], .pool-grid');
+                var cols = [];
+                if (grid) {
+                    cols = Array.prototype.slice.call(grid.children);
+                } else {
+                    // 两列卡片兜底
+                    cols = Array.prototype.slice.call(root.querySelectorAll('h4')).map(function (h) { return h.parentElement; });
+                }
+                var apiBox = null, ipBox = null;
+                cols.forEach(function (el) {
+                    var t = (el.innerText || '') + (el.querySelector('h4') ? el.querySelector('h4').innerText : '');
+                    if (/API/.test(t) && !apiBox) apiBox = el;
+                    if (/代理|IP 池|IP池/.test(t) && !ipBox) ipBox = el;
+                });
+                var apiMount = document.getElementById('poolApiMount');
+                var ipMount = document.getElementById('poolIpMount');
+                if (apiBox && apiMount && !apiMount.contains(apiBox)) apiMount.appendChild(apiBox);
+                if (ipBox && ipMount && !ipMount.contains(ipBox)) ipMount.appendChild(ipBox);
+                root.style.display = 'none';
+            } catch (e) { console.error('isolatePoolColumns', e); }
+        }
+
         function switchTab(tabName) {
+            try { isolatePoolColumns(); } catch (e) {}
+            if (tabName === 'pool') tabName = 'pool-api';
+            if (tabName === 'pool-api') { try { loadPoolApi(); } catch (e) {} }
+            if (tabName === 'pool-ip') { try { loadPoolProxy(); } catch (e) {} }
+
             try {
               if (tabName === 'keyword') document.body.classList.add('show-keyword');
               else document.body.classList.remove('show-keyword');
