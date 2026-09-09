@@ -653,13 +653,19 @@
                 el.innerHTML = pool.map(function (item, idx) {
                     const px = (typeof item === 'string') ? item : (item.proxy || item.url || '');
                     const boundSet = {};
-                    (item.bound || []).forEach(function (b) { boundSet[b.phone] = true; });
+                    (item.bound || []).forEach(function (b) { if (b.phone) boundSet[b.phone] = true; });
+                    if (!selectedPhonesByProxy._inited) selectedPhonesByProxy._inited = {};
+                    if (!selectedPhonesByProxy._inited[px]) {
+                        selectedPhonesByProxy[px] = {};
+                        Object.keys(boundSet).forEach(function (ph) { selectedPhonesByProxy[px][ph] = true; });
+                        selectedPhonesByProxy._inited[px] = true;
+                    }
                     const sel = selectedPhonesByProxy[px] || {};
                     const chips = (poolBotsCache || []).map(function (b, i) {
                         const ph = b.phone || '';
-                        const on = !!(sel[ph] || boundSet[ph]);
+                        const on = !!sel[ph];
                         const border = on ? '2px solid #22c55e' : '1px solid rgba(255,255,255,.15)';
-                        const bg = on ? 'rgba(34,197,94,.15)' : 'rgba(255,255,255,.04)';
+                        const bg = on ? 'rgba(34,197,94,.32)' : 'rgba(255,255,255,.04)';
                         return '<button type="button" class="proxy-chip" data-proxy="'+encodeURIComponent(px)+'" data-phone="'+ph+'" style="border:'+border+';background:'+bg+';color:#e8eef7;border-radius:999px;padding:4px 8px;margin:3px;font-size:12px;cursor:pointer;">'+(b.index || (i+1))+' '+(ph || b.name || '')+'</button>';
                     }).join('');
                     const boundCount = (item.bound_count != null) ? item.bound_count : (item.bound || []).length;
