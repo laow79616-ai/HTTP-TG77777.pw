@@ -702,6 +702,9 @@
                 const d = await apiCall('/api/pool/proxy/bind', 'POST', { proxy: px, phones: phones });
                 showToast('已绑定 ' + (d.changed || 0) + ' 个号到该 IP');
                 selectedPhonesByProxy[px] = {};
+                phones.forEach(function (ph) { selectedPhonesByProxy[px][ph] = true; });
+                if (!selectedPhonesByProxy._inited) selectedPhonesByProxy._inited = {};
+                selectedPhonesByProxy._inited[px] = true;
                 loadPoolProxy();
             } catch (e) { showToast(e.message); }
         }

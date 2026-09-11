@@ -34,5 +34,9 @@
   {
     "proxy": "38.110.204.89:40951:gFKlT9y3cu2A:gEVvlAALE1yY",
     "label": "38.110.204.89:40951:gFKlT9y3cu2A:gEVvlAA"
+  },
+  {
+    "proxy": "198.65.55.123:37149:YJU5quYpyuc6:iv5JbrZJdSM0",
+    "label": "198.65.55.123:37149:YJU5quYpyuc6:iv5JbrZ"
   }
 ]
