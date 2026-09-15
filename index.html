@@ -622,6 +622,17 @@
         const VALID_PASS = 'Ab123456987';
 
         
+        
+        async function deletePoolApi(apiId) {
+            if (!apiId) return;
+            if (!confirm('删除这个 API？不会改水军已保存的 api_id')) return;
+            try {
+                const d = await apiCall('/api/pool/api/item', 'POST', { api_id: apiId });
+                showToast('已删除，剩余 ' + (d.total || 0));
+                loadPoolApi();
+            } catch (e) { showToast(e.message); }
+        }
+
         async function loadPoolApi() {
             try {
                 const d = await apiCall('/api/pool/api');
@@ -629,7 +640,14 @@
                 const n = document.getElementById('poolApiCount');
                 if (n) n.textContent = '(' + pool.length + ')';
                 const el = document.getElementById('poolApiList');
-                if (el) el.innerHTML = pool.map(x => '<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06);">' + (x.label || x.api_id) + ' · ' + x.api_id + '</div>').join('') || '空';
+                if (el) el.innerHTML = pool.map(x => {
+                    const id = x.api_id || '';
+                    const label = x.label || ('API-' + id);
+                    return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.06);">'
+                        + '<div style="font-size:13px;word-break:break-all;">' + label + ' · ' + id + '</div>'
+                        + '<button type="button" class="btn btn-danger" style="padding:4px 10px;font-size:12px;flex:0 0 auto;" onclick="deletePoolApi(\''+id+'\')">删除</button>'
+                        + '</div>';
+                }).join('') || '空';
             } catch (e) { showToast('加载API池失败: ' + e.message); }
         }
         
@@ -1132,61 +1150,60 @@
             return usernames.length;
         }
 
+        
+        let jobPollTimer = null;
         async function startCheckQueued() {
-            if (batchRunning) { showToast('已有批次在跑'); return; }
-            const total = buildQueueFromInput();
-            if (!total) { showToast('请输入用户名'); return; }
-            showToast('队列 '+total+' 个，将自动按每批≤'+MAX_BATCH+' 执行');
-            queueTotalAll = usernameQueue.length;
-            queueDoneAll = 0;
-            queueBatchNo = 0;
-            batchRunning = true;
-            shouldStop = false;
-            document.getElementById('startCheckBtn').classList.add('hidden');
-            document.getElementById('stopCheckBtn').classList.remove('hidden');
-            checkResults = [];
-            let batchNo = 0;
-            while (usernameQueue.length && !shouldStop) {
-                batchNo++; queueBatchNo = batchNo;
-                const batch = usernameQueue.splice(0, MAX_BATCH);
-                showToast('第 '+batchNo+' 批：'+batch.length+' 个，剩余队列 '+usernameQueue.length);
-                await refreshBotWorkStatus();
-                // 无工作号则停
-                const work = (window._botRows||[]).filter(b => b.status==='work');
-                if (!work.length) {
-                    showToast('无可用水军（全在冷却或达每日上限），已停止');
-                    break;
-                }
-                // 把本批写入输入框逻辑改为直接跑 checkUsername 列表
-                isChecking = true;
-                const startIdx = checkResults.length;
-                batch.forEach(u => checkResults.push({username:u, status:'pending', time:null}));
-                updateCheckStats(); if (typeof renderCheckResults==='function') renderCheckResults();
-                renderCheckResults && renderCheckResults();
-                const delay = parseInt(document.getElementById('delayInput').value) || 3000;
-                for (let i = 0; i < batch.length; i++) {
-                    if (shouldStop) break;
-                    await checkUsername(batch[i], startIdx + i);
-                    // 若本条 flood → 全局停（checkUsername 内应设 shouldStop）
-                    const r = checkResults[startIdx + i];
-                    if (r && (r.status === 'flood' || (r.error && String(r.error).includes('FloodWait')))) {
-                        shouldStop = false; showToast('限流，1分钟后继续'); await waitAndResumeCheck('限流');;
-                        break;
-                    }
-                    if (i + 1 < batch.length) await sleep(delay);
-                }
-                await refreshBotWorkStatus();
-                if (shouldStop) break;
-                // 批间休息
-                if (usernameQueue.length) await sleep(5000);
+            const input = (document.getElementById('usernameInput') || {}).value || '';
+            if (!String(input).trim() && !(window.usernameQueue && usernameQueue.length)) {
+                showToast('请输入用户名'); return;
             }
-            batchRunning = false;
-            isChecking = false;
-            document.getElementById('startCheckBtn').classList.remove('hidden');
-            document.getElementById('stopCheckBtn').classList.add('hidden');
-            showToast(shouldStop ? '已停止（限流或手动）' : '队列全部完成');
-            updateCheckStats();
+            let list = String(input).trim() ? String(input).split(/\n/).map(u => u.trim().replace(/^@/, '')).filter(Boolean) : (usernameQueue || []);
+            try {
+                const d = await apiCall('/api/check/job/start', 'POST', { usernames: list });
+                showToast('已交给后台检测，刷新/断网也会继续');
+                attachJobPoll();
+            } catch (e) {
+                if (String(e.message || '').indexOf('已有任务') >= 0) {
+                    showToast('后台任务已在跑，已接上进度');
+                    attachJobPoll();
+                } else {
+                    showToast(e.message);
+                }
+            }
         }
+        async function stopCheck() {
+            shouldStop = true;
+            try { await apiCall('/api/check/job/stop', 'POST', {}); } catch (e) {}
+            showToast('已通知后台停止');
+        }
+        function attachJobPoll() {
+            if (jobPollTimer) clearInterval(jobPollTimer);
+            jobPollTimer = setInterval(syncCheckJob, 2000);
+            syncCheckJob();
+        }
+        async function syncCheckJob() {
+            try {
+                const d = await apiCall('/api/check/job/status');
+                if (!d) return;
+                const results = d.results || [];
+                if (results.length) checkResults = results;
+                if (typeof updateCheckStats === 'function') updateCheckStats();
+                if (typeof renderCheckResults === 'function') renderCheckResults();
+                const startBtn = document.getElementById('startCheckBtn');
+                const stopBtn = document.getElementById('stopCheckBtn');
+                if (d.running) {
+                    if (startBtn) startBtn.classList.add('hidden');
+                    if (stopBtn) stopBtn.classList.remove('hidden');
+                } else {
+                    if (startBtn) startBtn.classList.remove('hidden');
+                    if (stopBtn) stopBtn.classList.add('hidden');
+                    if (jobPollTimer && !d.running) { /* keep last snapshot */ }
+                }
+                const bar = document.getElementById('botWorkStatus');
+                if (bar) bar.textContent = (d.message || '') + ' · 完成 ' + (d.done||0) + '/' + (d.total||0) + ' · 剩余 ' + (d.left||0);
+            } catch (e) {}
+        }
+        setTimeout(function(){ try { attachJobPoll(); } catch(e){} }, 800);
 
         async function startCheck() {
             const input = document.getElementById('usernameInput').value.trim();

@@ -700,6 +700,23 @@ def api_verify_code():
 
 
 # ============ API 池 / 代理池 ============
+
+@app.route('/api/pool/api/item', methods=['POST'])
+@require_auth
+def api_pool_api_delete_item():
+    data = request.json or {}
+    api_id = str(data.get("api_id") or data.get("id") or "").strip()
+    if not api_id:
+        return jsonify({"error": "缺少 api_id"}), 400
+    pool = load_api_pool()
+    new_pool = []
+    for x in pool:
+        aid = str(x.get("api_id") if isinstance(x, dict) else x)
+        if aid != api_id:
+            new_pool.append(x)
+    save_api_pool(new_pool)
+    return jsonify({"success": True, "deleted": api_id, "total": len(new_pool)})
+
 @app.route('/api/pool/api', methods=['GET'])
 @require_auth
 def api_pool_list():
@@ -1061,6 +1078,132 @@ def api_check_usernames():
         return jsonify({"results": results, "total": len(results)})
     except Exception as e:
         return jsonify({"error": f"检测失败: {str(e)}"}), 500
+
+
+
+# ============ 后台检测任务（刷新/断网不中断） ============
+import copy
+JOB_LOCK = threading.Lock()
+CHECK_JOB = {
+    "running": False,
+    "should_stop": False,
+    "total": 0,
+    "done": 0,
+    "queue": [],
+    "results": [],
+    "started_at": None,
+    "updated_at": None,
+    "message": "",
+}
+
+def _job_snapshot():
+    with JOB_LOCK:
+        r = CHECK_JOB["results"][-800:]
+        return {
+            "running": CHECK_JOB["running"],
+            "total": CHECK_JOB["total"],
+            "done": CHECK_JOB["done"],
+            "left": max(0, CHECK_JOB["total"] - CHECK_JOB["done"]),
+            "message": CHECK_JOB["message"],
+            "started_at": CHECK_JOB["started_at"],
+            "updated_at": CHECK_JOB["updated_at"],
+            "results": r,
+            "available": sum(1 for x in CHECK_JOB["results"] if x.get("status") in ("clean", "available") or x.get("collect")),
+            "premium": sum(1 for x in CHECK_JOB["results"] if x.get("premium")),
+            "deleted": sum(1 for x in CHECK_JOB["results"] if x.get("status") in ("deleted", "unavailable")),
+            "error": sum(1 for x in CHECK_JOB["results"] if x.get("status") == "error"),
+        }
+
+def _check_job_worker():
+    from time import sleep as _sleep
+    while True:
+        with JOB_LOCK:
+            if CHECK_JOB["should_stop"] or not CHECK_JOB["queue"]:
+                CHECK_JOB["running"] = False
+                CHECK_JOB["message"] = "已停止" if CHECK_JOB["should_stop"] else "检测完成"
+                CHECK_JOB["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                break
+            username = CHECK_JOB["queue"].pop(0)
+        try:
+            # 复用现有单条接口逻辑
+            with app.test_request_context(
+                "/api/check/one",
+                method="POST",
+                json={"username": username},
+                headers={"Authorization": "Bearer " + AUTH_KEY},
+            ):
+                resp = api_check_one()
+            if hasattr(resp, "get_json"):
+                data = resp.get_json() or {}
+            elif isinstance(resp, tuple):
+                data = resp[0].get_json() if hasattr(resp[0], "get_json") else {"status": "error", "username": username}
+            else:
+                data = {"status": "error", "username": username}
+        except Exception as e:
+            data = {"username": username, "status": "error", "error": str(e)[:160], "premium": False}
+        data = data or {}
+        data.setdefault("username", username)
+        with JOB_LOCK:
+            CHECK_JOB["results"].append(data)
+            CHECK_JOB["done"] += 1
+            CHECK_JOB["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            CHECK_JOB["message"] = "检测中 %s/%s" % (CHECK_JOB["done"], CHECK_JOB["total"])
+        # 失败/限流：后台等 60 秒再继续，不丢队列
+        err = str(data.get("error") or "")
+        st = str(data.get("status") or "")
+        if st in ("flood", "error") or "FloodWait" in err or "未授权" in err:
+            _sleep(60)
+        else:
+            _sleep(1.2)
+
+@app.route("/api/check/job/start", methods=["POST"])
+@require_auth
+def api_check_job_start():
+    data = request.json or {}
+    raw = data.get("usernames") or data.get("text") or ""
+    if isinstance(raw, str):
+        usernames = [x.strip().lstrip("@") for x in raw.replace("\r", "\n").split("\n") if x.strip()]
+    else:
+        usernames = [str(x).strip().lstrip("@") for x in raw if str(x).strip()]
+    # 去重保序
+    seen = set()
+    uniq = []
+    for u in usernames:
+        k = u.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(u)
+    if not uniq:
+        return jsonify({"error": "没有用户名"}), 400
+    with JOB_LOCK:
+        if CHECK_JOB["running"]:
+            return jsonify({"error": "已有任务在后台运行", "job": _job_snapshot()}), 409
+        CHECK_JOB["running"] = True
+        CHECK_JOB["should_stop"] = False
+        CHECK_JOB["queue"] = uniq[:]
+        CHECK_JOB["results"] = []
+        CHECK_JOB["total"] = len(uniq)
+        CHECK_JOB["done"] = 0
+        CHECK_JOB["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        CHECK_JOB["updated_at"] = CHECK_JOB["started_at"]
+        CHECK_JOB["message"] = "后台任务已启动"
+    t = threading.Thread(target=_check_job_worker, daemon=True)
+    t.start()
+    return jsonify({"success": True, "job": _job_snapshot()})
+
+@app.route("/api/check/job/status", methods=["GET"])
+@require_auth
+def api_check_job_status():
+    return jsonify(_job_snapshot())
+
+@app.route("/api/check/job/stop", methods=["POST"])
+@require_auth
+def api_check_job_stop():
+    with JOB_LOCK:
+        CHECK_JOB["should_stop"] = True
+        CHECK_JOB["message"] = "正在停止"
+    return jsonify({"success": True})
 
 
 @app.route('/api/check/one', methods=['POST'])
