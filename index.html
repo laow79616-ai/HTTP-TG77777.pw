@@ -1153,42 +1153,102 @@
         
         let jobPollTimer = null;
         async function startCheckQueued() {
-            const input = (document.getElementById('usernameInput') || {}).value || '';
-            if (!String(input).trim() && !(window.usernameQueue && usernameQueue.length)) {
-                showToast('请输入用户名'); return;
-            }
-            let list = String(input).trim() ? String(input).split(/\n/).map(u => u.trim().replace(/^@/, '')).filter(Boolean) : (usernameQueue || []);
+            const raw = ((document.getElementById('usernameInput') || {}).value || '');
+            let list = raw.split(/\n/).map(u => u.trim().replace(/^@/, '')).filter(Boolean);
+            if (!list.length && window.usernameQueue && usernameQueue.length) list = usernameQueue.slice();
+            if (!list.length) { showToast('请输入用户名或上传txt'); return; }
+            showToast('提交后台任务，共 ' + list.length + ' 个');
             try {
                 const d = await apiCall('/api/check/job/start', 'POST', { usernames: list });
-                showToast('已交给后台检测，刷新/断网也会继续');
+                showToast('已交给后台，刷新/断网也会继续');
+                if (d && d.job) paintJobMeters(d.job);
                 attachJobPoll();
             } catch (e) {
-                if (String(e.message || '').indexOf('已有任务') >= 0) {
-                    showToast('后台任务已在跑，已接上进度');
-                    attachJobPoll();
-                } else {
-                    showToast(e.message);
-                }
+                showToast(e.message || String(e));
+                attachJobPoll();
             }
         }
         async function stopCheck() {
             shouldStop = true;
-            try { await apiCall('/api/check/job/stop', 'POST', {}); } catch (e) {}
-            showToast('已通知后台停止');
+            try {
+                await apiCall('/api/check/job/stop', 'POST', {});
+                showToast('已手动停止后台检测');
+            } catch (e) {
+                showToast('停止失败: ' + (e.message || e));
+            }
+            try { await syncCheckJob(); } catch (e) {}
         }
         function attachJobPoll() {
-            if (jobPollTimer) clearInterval(jobPollTimer);
-            jobPollTimer = setInterval(syncCheckJob, 2000);
+            if (window.jobPollTimer) clearInterval(window.jobPollTimer);
+            window.jobPollTimer = setInterval(syncCheckJob, 2000);
             syncCheckJob();
         }
+        
+        function paintJobMeters(d) {
+            if (!d) return;
+            const total = Number(d.total || 0);
+            const done = Number(d.done || 0);
+            const leftAll = Math.max(0, total - done);
+            const batchSize = 300;
+            const running = !!d.running;
+            const batchWork = running ? Math.min(batchSize, leftAll) : 0;
+            const queueLeft = running ? Math.max(0, leftAll - batchWork) : 0;
+            const available = Number(d.available || 0);
+            const premium = Number(d.premium || 0);
+            const deleted = Number(d.deleted || 0);
+
+            function fillCard(labelText, value) {
+                const cards = document.querySelectorAll('.stat-card, .card, div');
+                for (const card of cards) {
+                    const lab = card.querySelector('.label');
+                    if (!lab) continue;
+                    const t = (lab.textContent || '').replace(/\s+/g, '');
+                    if (t === labelText.replace(/\s+/g, '')) {
+                        const num = card.querySelector('.number');
+                        if (num) num.textContent = String(value);
+                        return true;
+                    }
+                }
+                return false;
+            }
+            fillCard('总导入', total);
+            fillCard('本批工作', batchWork);
+            fillCard('队列剩余', queueLeft);
+            fillCard('可用', available);
+            fillCard('会员', premium);
+            fillCard('已删除', deleted);
+            fillCard('检测中', running ? batchWork : 0);
+
+            let line = document.getElementById('jobSummaryLine');
+            if (!line) {
+                document.querySelectorAll('div,p,span').forEach(function (el) {
+                    if (line) return;
+                    const raw = el.textContent || '';
+                    if (el.children.length === 0 && raw.indexOf('总导入') >= 0 && raw.indexOf('本批') >= 0 && raw.length < 80) {
+                        el.id = 'jobSummaryLine';
+                        line = el;
+                    }
+                });
+            }
+            if (line) line.textContent = '总导入 ' + total + ' · 本批工作 ' + batchWork + ' · 队列剩余 ' + queueLeft;
+
+            const bar = document.getElementById('botWorkStatus');
+            if (bar) bar.textContent = (d.message || '') + ' · 完成 ' + done + '/' + total + ' · 本批' + batchWork + ' · 剩余 ' + queueLeft;
+            window.jobMeta = d;
+        }
+
         async function syncCheckJob() {
             try {
                 const d = await apiCall('/api/check/job/status');
                 if (!d) return;
-                const results = d.results || [];
-                if (results.length) checkResults = results;
-                if (typeof updateCheckStats === 'function') updateCheckStats();
-                if (typeof renderCheckResults === 'function') renderCheckResults();
+                window.jobMeta = d;
+                if (Array.isArray(d.results) && d.results.length) {
+                    checkResults = d.results;
+                    if (typeof renderCheckResults === 'function') {
+                        try { renderCheckResults(); } catch (e) {}
+                    }
+                }
+                paintJobMeters(d);
                 const startBtn = document.getElementById('startCheckBtn');
                 const stopBtn = document.getElementById('stopCheckBtn');
                 if (d.running) {
@@ -1197,10 +1257,7 @@
                 } else {
                     if (startBtn) startBtn.classList.remove('hidden');
                     if (stopBtn) stopBtn.classList.add('hidden');
-                    if (jobPollTimer && !d.running) { /* keep last snapshot */ }
                 }
-                const bar = document.getElementById('botWorkStatus');
-                if (bar) bar.textContent = (d.message || '') + ' · 完成 ' + (d.done||0) + '/' + (d.total||0) + ' · 剩余 ' + (d.left||0);
             } catch (e) {}
         }
         setTimeout(function(){ try { attachJobPoll(); } catch(e){} }, 800);

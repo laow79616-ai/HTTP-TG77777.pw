@@ -1098,12 +1098,17 @@ CHECK_JOB = {
 
 def _job_snapshot():
     with JOB_LOCK:
-        r = CHECK_JOB["results"][-800:]
+        r = CHECK_JOB["results"][-200:]  # 列表只回最近200条，总数用 total/done
+        left = max(0, CHECK_JOB["total"] - CHECK_JOB["done"])
+        batch_size = 300
+        cur_batch = min(batch_size, left if CHECK_JOB["running"] and left else (CHECK_JOB["done"] % batch_size or min(batch_size, CHECK_JOB["done"])))
         return {
             "running": CHECK_JOB["running"],
             "total": CHECK_JOB["total"],
             "done": CHECK_JOB["done"],
-            "left": max(0, CHECK_JOB["total"] - CHECK_JOB["done"]),
+            "left": left,
+            "batch_size": batch_size,
+            "batch_work": cur_batch,
             "message": CHECK_JOB["message"],
             "started_at": CHECK_JOB["started_at"],
             "updated_at": CHECK_JOB["updated_at"],
