@@ -571,45 +571,24 @@ def api_bot_remove():
 @app.route('/api/bot/start', methods=['POST'])
 @require_auth
 def api_bot_start():
-    """启动水军：校验 session 可用后标记为 running"""
+    """启动水军：只恢复工作状态，不在这里连 Telegram（避免卡住）。"""
     data = request.json or {}
-    bot_id = data.get('bot_id', '') or data.get('id', '')
+    bot_id = str(data.get("bot_id") or data.get("id") or data.get("name") or "").strip()
+    if not bot_id:
+        return jsonify({"error": "缺少水军 id"}), 400
     config = load_config()
-    bots = config.get('bots', [])
     found = None
-    for b in bots:
-        if b.get('id') == bot_id:
+    for b in config.get("bots") or []:
+        if str(b.get("id")) == bot_id or str(b.get("name")) == bot_id or str(b.get("phone")) == bot_id:
             found = b
             break
     if not found:
         return jsonify({"error": "水军不存在"}), 404
-
-    session_path = found.get('session_path', '')
-    if not session_path:
-        return jsonify({"error": "无 session 文件，请重新登录添加"}), 400
-
-    # 尝试连接验证
-    try:
-        from telethon import TelegramClient
-        api_id = int(found.get('api_id') or API_CONFIGS[0]['api_id'])
-        api_hash = found.get('api_hash') or API_CONFIGS[0]['api_hash']
-
-        async def _check():
-            client = TelegramClient(session_path, api_id, api_hash, loop=_loop)
-            await client.connect()
-            ok = await client.is_user_authorized()
-            await client.disconnect()
-            return ok
-
-        ok = run_async(_check())
-        if not ok:
-            return jsonify({"error": "Session 已失效，请重新登录该水军"}), 400
-    except Exception as e:
-        return jsonify({"error": f"启动失败: {str(e)}"}), 400
-
-    found['status'] = 'running'
+    found["status"] = "running"
+    found.pop("cooldown_until", None)
     save_config(config)
-    return jsonify({"success": True, "message": f"水军 {found.get('name', bot_id)} 已启动", "status": "running"})
+    return jsonify({"success": True, "message": "已启动", "id": found.get("id"), "status": "running"})
+
 
 @app.route('/api/bot/stop', methods=['POST'])
 @require_auth
