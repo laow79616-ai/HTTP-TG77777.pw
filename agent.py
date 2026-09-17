@@ -32,6 +32,9 @@ CONFIG_FILE = "/root/bot_agent/config.json"
 BLACKLIST_FILE = "/root/bot_agent/blacklist.json"
 AVAILABLE_FILE = "/root/bot_agent/available_usernames.json"
 PREMIUM_FILE = "/root/bot_agent/premium_usernames.json"
+
+SEEN_FILE = "/root/bot_agent/checked_history.json"
+SKIP_LOG_FILE = "/root/bot_agent/skip_history.json"
 TARGETS_FILE = "/root/bot_agent/target_usernames.json"
 SESSIONS_DIR = "/root/bot_agent/sessions"
 
@@ -71,6 +74,97 @@ def run_async(coro):
     return future.result(timeout=60)
 
 # ============ 工具函数 ============
+
+def _norm_uname(u):
+    u = str(u or "").strip()
+    if u.startswith("@"):
+        u = u[1:]
+    return u.lower()
+
+def load_json_list(path):
+    if not os.path.exists(path):
+        return []
+    try:
+        data = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return data.get("usernames") or data.get("items") or []
+    return []
+
+def load_skip_set():
+    skip = set()
+    for path in (TARGETS_FILE if "TARGETS_FILE" in globals() else "/root/bot_agent/target_usernames.json",
+                 PREMIUM_FILE if "PREMIUM_FILE" in globals() else "/root/bot_agent/premium_usernames.json",
+                 "/root/bot_agent/checked_history.json"):
+        for item in load_json_list(path):
+            if isinstance(item, dict):
+                u = item.get("username") or item.get("user") or ""
+            else:
+                u = item
+            n = _norm_uname(u)
+            if n:
+                skip.add(n)
+    return skip
+
+def save_checked_history(usernames):
+    path = "/root/bot_agent/checked_history.json"
+    old = load_json_list(path)
+    have = set(_norm_uname(x if not isinstance(x, dict) else x.get("username")) for x in old)
+    added = 0
+    for u in usernames:
+        n = _norm_uname(u)
+        if not n or n in have:
+            continue
+        old.append("@" + n)
+        have.add(n)
+        added += 1
+    json.dump(old, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    return added
+
+def filter_job_usernames(raw_list):
+    """本文件去重 + 跳过 target/premium/历史检测"""
+    skip = load_skip_set()
+    seen = set()
+    kept = []
+    stats = {"input": 0, "dup_in_file": 0, "skip_history": 0, "kept": 0}
+    for item in raw_list or []:
+        if isinstance(item, dict):
+            u = item.get("username") or item.get("user") or ""
+        else:
+            u = item
+        n = _norm_uname(u)
+        if not n:
+            continue
+        stats["input"] += 1
+        if n in seen:
+            stats["dup_in_file"] += 1
+            continue
+        seen.add(n)
+        if n in skip:
+            stats["skip_history"] += 1
+            continue
+        kept.append(n)
+        stats["kept"] += 1
+    log = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        **stats,
+        "skip_pool": len(skip),
+    }
+    try:
+        save_checked_history(list(seen))
+    except Exception as e:
+        print("save_checked_history", e)
+    hist = load_json_list("/root/bot_agent/skip_history.json")
+    if not isinstance(hist, list):
+        hist = []
+    hist.append(log)
+    json.dump(hist[-200:], open("/root/bot_agent/skip_history.json", "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    print("[dedup]", log)
+    return kept, stats
+
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as f:
@@ -1205,8 +1299,10 @@ def api_check_job_start():
     raw = data.get("usernames") or data.get("text") or ""
     if isinstance(raw, str):
         usernames = [x.strip().lstrip("@") for x in raw.replace("\r", "\n").split("\n") if x.strip()]
+        usernames, _dedup_stats = filter_job_usernames(usernames)
     else:
         usernames = [str(x).strip().lstrip("@") for x in raw if str(x).strip()]
+        usernames, _dedup_stats = filter_job_usernames(usernames)
     # 去重保序
     seen = set()
     uniq = []
