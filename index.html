@@ -1170,14 +1170,17 @@
         }
         async function stopCheck() {
             shouldStop = true;
+            isChecking = false;
             try {
                 await apiCall('/api/check/job/stop', 'POST', {});
-                showToast('已手动停止后台检测');
-            } catch (e) {
-                showToast('停止失败: ' + (e.message || e));
-            }
-            try { await syncCheckJob(); } catch (e) {}
+            } catch (e) {}
+            var a = document.getElementById('startCheckBtn');
+            var b = document.getElementById('stopCheckBtn');
+            if (a) a.classList.remove('hidden');
+            if (b) b.classList.add('hidden');
+            showToast('已停止');
         }
+
         function attachJobPoll() {
             if (window.jobPollTimer) clearInterval(window.jobPollTimer);
             window.jobPollTimer = setInterval(syncCheckJob, 2000);
@@ -1368,8 +1371,7 @@
             }
             try { updateCheckStats(); if (typeof renderCheckResults === 'function') renderCheckResults(); } catch (e) {}
         }
-
-        function stopCheck() { shouldStop = true; isChecking = false; document.getElementById('startCheckBtn').classList.remove('hidden'); document.getElementById('stopCheckBtn').classList.add('hidden'); showToast('已停止'); }
+        /* old stopCheck removed */
         function clearCheck() { checkResults = []; document.getElementById('usernameInput').value = ''; document.getElementById('progressBar').classList.remove('active'); document.getElementById('checkStats').style.display = 'grid'; document.getElementById('checkResultsSection').style.display = 'none'; updateCheckStats(); }
 
         function updateCheckStats() {
