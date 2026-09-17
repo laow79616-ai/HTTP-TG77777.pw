@@ -1098,68 +1098,105 @@ CHECK_JOB = {
 
 def _job_snapshot():
     with JOB_LOCK:
-        r = CHECK_JOB["results"][-200:]  # 列表只回最近200条，总数用 total/done
-        left = max(0, CHECK_JOB["total"] - CHECK_JOB["done"])
-        batch_size = 300
-        cur_batch = min(batch_size, left if CHECK_JOB["running"] and left else (CHECK_JOB["done"] % batch_size or min(batch_size, CHECK_JOB["done"])))
+        total = CHECK_JOB.get("total") or 0
+        done = CHECK_JOB.get("done") or 0
+        running = bool(CHECK_JOB.get("running"))
+        batch_size = int(CHECK_JOB.get("batch_size") or 300)
+        qlen = len(CHECK_JOB.get("queue") or [])
+        # 本批进行中：队列长度保持不变；本批人数=总数-已完成-队列
+        in_batch = max(0, total - done - qlen)
+        if running:
+            batch_work = in_batch if in_batch else min(batch_size, max(0, total - done))
+            queue_left = qlen
+        else:
+            batch_work = 0
+            queue_left = qlen
+        results = CHECK_JOB.get("results") or []
         return {
-            "running": CHECK_JOB["running"],
-            "total": CHECK_JOB["total"],
-            "done": CHECK_JOB["done"],
-            "left": left,
+            "running": running,
+            "total": total,
+            "done": done,
+            "left": queue_left,
             "batch_size": batch_size,
-            "batch_work": cur_batch,
-            "message": CHECK_JOB["message"],
-            "started_at": CHECK_JOB["started_at"],
-            "updated_at": CHECK_JOB["updated_at"],
-            "results": r,
-            "available": sum(1 for x in CHECK_JOB["results"] if x.get("status") in ("clean", "available") or x.get("collect")),
-            "premium": sum(1 for x in CHECK_JOB["results"] if x.get("premium")),
-            "deleted": sum(1 for x in CHECK_JOB["results"] if x.get("status") in ("deleted", "unavailable")),
-            "error": sum(1 for x in CHECK_JOB["results"] if x.get("status") == "error"),
+            "batch_work": batch_work,
+            "queue_left": queue_left,
+            "in_batch": in_batch,
+            "message": CHECK_JOB.get("message") or "",
+            "started_at": CHECK_JOB.get("started_at"),
+            "updated_at": CHECK_JOB.get("updated_at"),
+            "results": results[-200:],
+            "available": sum(1 for x in results if x.get("status") in ("clean", "available") or x.get("collect")),
+            "premium": sum(1 for x in results if x.get("premium")),
+            "deleted": sum(1 for x in results if x.get("status") in ("deleted", "unavailable")),
+            "error": sum(1 for x in results if x.get("status") == "error"),
         }
 
 def _check_job_worker():
     from time import sleep as _sleep
+    batch_size = 300
     while True:
         with JOB_LOCK:
-            if CHECK_JOB["should_stop"] or not CHECK_JOB["queue"]:
+            if CHECK_JOB.get("should_stop"):
                 CHECK_JOB["running"] = False
-                CHECK_JOB["message"] = "已停止" if CHECK_JOB["should_stop"] else "检测完成"
+                CHECK_JOB["message"] = "已手动停止"
                 CHECK_JOB["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 break
-            username = CHECK_JOB["queue"].pop(0)
-        try:
-            # 复用现有单条接口逻辑
-            with app.test_request_context(
-                "/api/check/one",
-                method="POST",
-                json={"username": username},
-                headers={"Authorization": "Bearer " + AUTH_KEY},
-            ):
-                resp = api_check_one()
-            if hasattr(resp, "get_json"):
-                data = resp.get_json() or {}
-            elif isinstance(resp, tuple):
-                data = resp[0].get_json() if hasattr(resp[0], "get_json") else {"status": "error", "username": username}
-            else:
-                data = {"status": "error", "username": username}
-        except Exception as e:
-            data = {"username": username, "status": "error", "error": str(e)[:160], "premium": False}
-        data = data or {}
-        data.setdefault("username", username)
-        with JOB_LOCK:
-            CHECK_JOB["results"].append(data)
-            CHECK_JOB["done"] += 1
+            q = CHECK_JOB.get("queue") or []
+            if not q:
+                CHECK_JOB["running"] = False
+                CHECK_JOB["message"] = "检测完成"
+                CHECK_JOB["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                break
+            # 只取出本批最多300个，其余留在队列
+            batch = q[:batch_size]
+            CHECK_JOB["queue"] = q[batch_size:]
+            CHECK_JOB["batch_size"] = batch_size
+            CHECK_JOB["message"] = "本批检测 %s，队列剩余 %s" % (len(batch), len(CHECK_JOB["queue"]))
             CHECK_JOB["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            CHECK_JOB["message"] = "检测中 %s/%s" % (CHECK_JOB["done"], CHECK_JOB["total"])
-        # 失败/限流：后台等 60 秒再继续，不丢队列
-        err = str(data.get("error") or "")
-        st = str(data.get("status") or "")
-        if st in ("flood", "error") or "FloodWait" in err or "未授权" in err:
-            _sleep(60)
-        else:
-            _sleep(1.2)
+
+        for username in batch:
+            with JOB_LOCK:
+                if CHECK_JOB.get("should_stop"):
+                    # 本批未跑完的退回队列头
+                    rest = batch[batch.index(username):]
+                    CHECK_JOB["queue"] = rest + (CHECK_JOB.get("queue") or [])
+                    CHECK_JOB["running"] = False
+                    CHECK_JOB["message"] = "已手动停止"
+                    CHECK_JOB["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    return
+            try:
+                with app.test_request_context(
+                    "/api/check/one",
+                    method="POST",
+                    json={"username": username},
+                    headers={"Authorization": "Bearer " + AUTH_KEY},
+                ):
+                    resp = api_check_one()
+                if hasattr(resp, "get_json"):
+                    data = resp.get_json() or {}
+                elif isinstance(resp, tuple):
+                    data = resp[0].get_json() if hasattr(resp[0], "get_json") else {}
+                else:
+                    data = {}
+            except Exception as e:
+                data = {"username": username, "status": "error", "error": str(e)[:160], "premium": False}
+            data = data or {}
+            data.setdefault("username", username)
+            with JOB_LOCK:
+                CHECK_JOB["results"].append(data)
+                CHECK_JOB["done"] = int(CHECK_JOB.get("done") or 0) + 1
+                CHECK_JOB["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                left_q = len(CHECK_JOB.get("queue") or [])
+                CHECK_JOB["message"] = "本批工作中 · 完成 %s/%s · 队列剩余 %s" % (
+                    CHECK_JOB["done"], CHECK_JOB["total"], left_q
+                )
+            err = str(data.get("error") or "")
+            st = str(data.get("status") or "")
+            if st in ("flood",) or "FloodWait" in err:
+                _sleep(60)
+            else:
+                _sleep(1.2)
+        # 本批结束，下一轮 while 再从剩余取300
 
 @app.route("/api/check/job/start", methods=["POST"])
 @require_auth
@@ -1196,6 +1233,88 @@ def api_check_job_start():
     t = threading.Thread(target=_check_job_worker, daemon=True)
     t.start()
     return jsonify({"success": True, "job": _job_snapshot()})
+
+
+@app.route("/api/check/job/export", methods=["GET"])
+@require_auth
+def api_check_job_export():
+    kind = (request.args.get("type") or "clean").strip().lower()
+    with JOB_LOCK:
+        rows = list(CHECK_JOB.get("results") or [])
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        u = (r.get("username") or "").strip().lstrip("@")
+        if not u:
+            continue
+        st = r.get("status")
+        prem = bool(r.get("premium"))
+        collect = bool(r.get("collect"))
+        if kind in ("clean", "available", "target"):
+            if collect or st in ("clean", "available"):
+                out.append("@" + u)
+        elif kind in ("premium", "vip"):
+            if prem:
+                out.append("@" + u)
+        elif kind in ("deleted",):
+            if st in ("deleted", "unavailable"):
+                out.append("@" + u)
+        else:
+            out.append("@" + u)
+    # 去重保序
+    seen = set()
+    uniq = []
+    for x in out:
+        k = x.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(x)
+    text = "\n".join(uniq) + ("\n" if uniq else "")
+    from flask import Response
+    fname = "job_%s_%s.txt" % (kind, len(uniq))
+    return Response(
+        text,
+        mimetype="text/plain; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=%s" % fname},
+    )
+
+@app.route("/api/check/job/export_json", methods=["GET"])
+@require_auth
+def api_check_job_export_json():
+    kind = (request.args.get("type") or "clean").strip().lower()
+    with JOB_LOCK:
+        rows = list(CHECK_JOB.get("results") or [])
+    items = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        u = (r.get("username") or "").strip().lstrip("@")
+        if not u:
+            continue
+        st = r.get("status")
+        prem = bool(r.get("premium"))
+        collect = bool(r.get("collect"))
+        ok = False
+        if kind in ("clean", "available", "target"):
+            ok = collect or st in ("clean", "available")
+        elif kind in ("premium", "vip"):
+            ok = prem
+        elif kind in ("deleted",):
+            ok = st in ("deleted", "unavailable")
+        else:
+            ok = True
+        if ok:
+            items.append("@" + u)
+    seen = set(); uniq = []
+    for x in items:
+        k = x.lower()
+        if k in seen:
+            continue
+        seen.add(k); uniq.append(x)
+    return jsonify({"success": True, "type": kind, "total": len(uniq), "usernames": uniq})
+
 
 @app.route("/api/check/job/status", methods=["GET"])
 @require_auth
@@ -1835,6 +1954,33 @@ def api_bots_work_status():
         "max_batch": MAX_BATCH_SIZE,
         "default_daily_limit": DEFAULT_DAILY_LIMIT,
     })
+
+
+
+@app.route("/api/export/round", methods=["GET"])
+@require_auth
+def api_export_round():
+    kind = (request.args.get("type") or "clean").strip().lower()
+    files = {
+        "clean": "/root/bot_agent/job_round_clean.txt",
+        "available": "/root/bot_agent/job_round_clean.txt",
+        "premium": "/root/bot_agent/job_round_premium.txt",
+        "vip": "/root/bot_agent/job_round_premium.txt",
+        "all": "/root/bot_agent/job_round_all.txt",
+    }
+    path = files.get(kind) or files["clean"]
+    if not os.path.exists(path):
+        return jsonify({"success": False, "error": "本轮文件不存在", "usernames": [], "total": 0})
+    lines = []
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            u = raw.strip()
+            if not u:
+                continue
+            if not u.startswith("@"):
+                u = "@" + u
+            lines.append(u)
+    return jsonify({"success": True, "type": kind, "total": len(lines), "usernames": lines})
 
 
 @app.route('/api/status', methods=['GET'])
