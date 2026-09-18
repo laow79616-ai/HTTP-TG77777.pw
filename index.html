@@ -434,6 +434,14 @@
                 </div>
                 <div class="form-group">
                     <label>手动输入用户名（每行一个，不需要@符号）</label>
+                    
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 10px">
+                    <button class="btn btn-secondary" type="button" onclick="saveCheckPool()">保存到检测池</button>
+                    <button class="btn btn-secondary" type="button" onclick="loadCheckPool()">载入检测池</button>
+                    <button class="btn btn-danger" type="button" onclick="clearCheckPoolAll()">一键全选删除用户名</button>
+                    <span id="checkPoolHint" style="font-size:12px;color:var(--text-secondary);align-self:center"></span>
+                </div>
+
                     <textarea id="usernameInput" placeholder="username1&#10;username2&#10;username3"></textarea>
                 </div>
                 <div class="form-row">
@@ -491,7 +499,13 @@
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('available')">可用</button>
                     
                     <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('premium')">会员</button>
-                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('deleted')">已删除</button>
+                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('clean')">可用</button>
+                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('premium')">会员</button>
+                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('ad')">广告</button>
+                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('spam')">水军号</button>
+                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('frozen')">冻结</button>
+                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('deleted')">已注销</button>
+                    <button class="btn btn-sm btn-secondary" onclick="filterCheckResults('available')">未注册</button>
                 </div>
                 <p style="color:var(--text-secondary);font-size:12px;margin-bottom:8px;">提示：本轮：可用=干净活跃；会员=Premium。导出本轮≠服务器累计。广告/水军/注销/未注册不采集。</p>
                 <div class="username-list" id="checkResultsList" style="max-height:500px;overflow-y:auto;background:var(--bg);border-radius:10px;padding:8px 0;border:1px solid var(--border)"></div>
@@ -612,7 +626,7 @@
         // Config
         let AUTH_KEY = localStorage.getItem('tg_auth_key') || '';
         let botsData = [];
-        let checkResults = [];
+        let checkResults = sanitizeJobRows(dedupeCheckResults([]));
         let filteredResults = [];
         let isChecking = false;
         let shouldStop = false;
@@ -855,7 +869,7 @@
             networkPaused = false;
             pendingResume = false;
             // 只续跑还在 pending 的
-            const left = (checkResults || []).filter(r => r.status === 'pending' || r.status === 'error').map(r => r.username);
+            const left = (checkResults || []).filter(r => r.status === 'pending' || (r.status === 'error' && !(r.error||'').includes('FloodWait'))).map(r => r.username);
             if (!left.length) {
                 try { showToast('网络已恢复，没有待检测项'); } catch (e) {}
                 return;
@@ -1108,162 +1122,163 @@
             reader.readAsText(file);
         }
 
-        
         const MAX_BATCH = 300;
-        let usernameQueue = [];
-        let queueTotalAll = 0;
-        let queueDoneAll = 0;
-        let queueBatchNo = 0;
-
-        let batchRunning = false;
-
-        
-        async function refreshBotWorkStatus() {
-            try {
-                const d = await apiCall('/api/bots/work_status');
-                const s = d.summary || {};
-                const bots = d.bots || [];
-                window._botRows = bots;
-                let used = 0;
-                bots.forEach(b => { used += (b.daily_used || 0); });
-                const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-                set('dsWork', s.work != null ? s.work : '-');
-                set('dsCool', s.cooldown != null ? s.cooldown : '-');
-                set('dsCapped', s.daily_capped != null ? s.daily_capped : '-');
-                set('dsToday', used);
-                const el = document.getElementById('botWorkStatus');
-                if (el) {
-                    el.textContent = '每批≤' + (d.max_batch || 300) + ' · 每号每日≤' + (d.default_daily_limit || 500) +
-                        ' · 工作' + (s.work || 0) + ' · 冷却' + (s.cooldown || 0) + ' · 今日检测' + used;
-                }
-            } catch (e) {
-                const el = document.getElementById('botWorkStatus');
-                if (el) el.textContent = '状态加载失败';
-            }
-        }
-
-        function buildQueueFromInput() {
-            const input = document.getElementById('usernameInput').value.trim();
-            let usernames = input.split(/\n/).map(u => u.trim().replace(/^@/, '')).filter(u => u.length > 0);
-            usernames = [...new Set(usernames.map(u => u.toLowerCase()))];
-            usernameQueue = usernames;
-            return usernames.length;
-        }
-
-        
         let jobPollTimer = null;
-        async function startCheckQueued() {
-            const raw = ((document.getElementById('usernameInput') || {}).value || '');
-            let list = raw.split(/\n/).map(u => u.trim().replace(/^@/, '')).filter(Boolean);
-            if (!list.length && window.usernameQueue && usernameQueue.length) list = usernameQueue.slice();
-            if (!list.length) { showToast('请输入用户名或上传txt'); return; }
-            showToast('提交后台任务，共 ' + list.length + ' 个');
-            try {
-                const d = await apiCall('/api/check/job/start', 'POST', { usernames: list });
-                showToast('已交给后台，刷新/断网也会继续');
-                if (d && d.job) paintJobMeters(d.job);
-                attachJobPoll();
-            } catch (e) {
-                showToast(e.message || String(e));
-                attachJobPoll();
+        let jobUiLock = false;
+        let lastJobRunning = null;
+        let lastRenderKey = '';
+
+        function applyJobButtons(running) {
+            if (lastJobRunning === running) return;
+            lastJobRunning = running;
+            var startBtn = document.getElementById('startCheckBtn');
+            var stopBtn = document.getElementById('stopCheckBtn');
+            if (!startBtn || !stopBtn) return;
+            if (running) { startBtn.classList.add('hidden'); stopBtn.classList.remove('hidden'); }
+            else { startBtn.classList.remove('hidden'); stopBtn.classList.add('hidden'); }
+        }
+
+        function jobStatusText(r) {
+            var st = (r && r.status) || '';
+            var prem = !!(r && r.premium);
+            if (prem) return {t:'会员', c:'#ffc107'};
+            if (st === 'clean' || st === 'available' || r.collect) return {t:'可用', c:'#22c55e'};
+            if (st === 'deleted') return {t:'已删除', c:'#a855f7'};
+            if (st === 'ad') return {t:'广告', c:'#fb923c'};
+            if (st === 'spam') return {t:'水军号', c:'#94a3b8'};
+            if (st === 'unavailable') return {t:'频道/非个人', c:'#64748b'};
+            if (st === 'invalid') return {t:'无效', c:'#64748b'};
+            if (st === 'flood') return {t:'限流', c:'#f97316'};
+            if ((r.error||'').indexOf('session') >= 0 || (r.error||'').indexOf('未授权') >= 0) return {t:'会话失效', c:'#f59e0b'};
+            if (st === 'error') return {t:'错误', c:'#60a5fa'};
+            if (st === 'checking' || st === 'pending') return {t:'检测中', c:'#38bdf8'};
+            return {t: st || '等待', c:'#94a3b8'};
+        }
+
+        function paintJobResults(job) {
+            if (!job) return;
+            var total = Number(job.total || 0);
+            var done = Number(job.done || 0);
+            var qleft = Number(job.queue_left != null ? job.queue_left : (job.left || 0));
+            var batchWork = Number(job.batch_work || job.in_batch || 0);
+            if (!batchWork && job.running) batchWork = Math.min(MAX_BATCH, Math.max(0, total - done - qleft));
+            var line = document.getElementById('queueSummary') || document.getElementById('checkQueueLine');
+            var summary = '总导入 ' + total + ' · 本批工作 ' + batchWork + ' · 队列剩余 ' + qleft;
+            if (line) line.textContent = summary;
+            else {
+                var host = document.getElementById('checkStats');
+                if (host && !document.getElementById('queueSummaryAuto')) {
+                    var d = document.createElement('div');
+                    d.id = 'queueSummaryAuto';
+                    d.style.cssText = 'grid-column:1/-1;color:var(--text-secondary);font-size:13px;margin:0 0 8px';
+                    host.parentNode.insertBefore(d, host);
+                }
+                var a = document.getElementById('queueSummaryAuto');
+                if (a) a.textContent = summary;
+            }
+            var set = function(id, v){ var el=document.getElementById(id); if(el) el.textContent = v; };
+            set('checkTotal', total);
+            set('checkBatch', batchWork);
+            set('checkQueueLeft', qleft);
+            set('checkPending', batchWork);
+            var rows = job.results || [];
+            var clean = 0, prem = 0, del = 0;
+            rows.forEach(function(r){
+                if (r.premium) prem++;
+                if (r.status === 'clean' || r.collect) clean++;
+                if (r.status === 'deleted') del++;
+            });
+            set('checkAvailable', job.available != null ? job.available : clean);
+            set('checkPremium', job.premium != null ? job.premium : prem);
+            set('checkDeleted', job.deleted != null ? job.deleted : del);
+            set('checkWorking', batchWork);
+
+            checkResults = sanitizeJobRows(rows.slice());
+            var box = document.getElementById('checkResultsList')
+                || document.getElementById('checkResultList')
+                || document.querySelector('#checkResultsSection .username-list');
+            var sec = document.getElementById('checkResultsSection');
+            if (sec) sec.style.display = 'block';
+            var stats = document.getElementById('checkStats');
+            if (stats) stats.style.display = 'grid';
+            if (box) {
+                var key = done + ':' + rows.length + ':' + qleft + ':' + (job.updated_at||'');
+                if (key !== lastRenderKey) {
+                    lastRenderKey = key;
+                    var html = '';
+                    if (!rows.length && job.running) {
+                        html = '<div style="padding:12px 16px;color:var(--text-secondary)">后台已启动，正在写入本批结果…</div>';
+                    }
+                    rows.slice().reverse().forEach(function(r){
+                        var u = String(r.username||'').replace(/^@/,'');
+                        var s = jobStatusText(r);
+                        html += '<div class="username-item" style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border)">'
+                             + '<span>@'+u+'</span>'
+                             + '<span style="color:'+s.c+';font-size:12px;font-weight:600">'+s.t+(r.error?(' · '+r.error):'')+'</span>'
+                             + '</div>';
+                    });
+                    box.innerHTML = html || '<div style="padding:12px 16px;color:var(--text-secondary)">暂无结果</div>';
+                }
             }
         }
+
+        async function startCheckQueued() {
+            if (jobUiLock) return;
+            var box = document.getElementById('usernameInput');
+            var raw = box ? String(box.value||'') : '';
+            var list = raw.split(/\r?\n/).map(function(u){return u.trim().replace(/^@/,'');}).filter(Boolean);
+            if (!list.length) { showToast('请输入用户名'); return; }
+            jobUiLock = true;
+            lastRenderKey = '';
+            applyJobButtons(true);
+            showToast('提交 '+list.length+' 个，每批最多 '+MAX_BATCH);
+            var token = localStorage.getItem('tg_auth_key') || 'fe570f573d2840308f6a298daa3ad4a0';
+            try { await fetch('/api/check/job/stop', {method:'POST', headers:{'Authorization':'Bearer '+token}}); } catch(e){}
+            try {
+                var res = await fetch('/api/check/job/start', {
+                    method:'POST',
+                    headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
+                    body: JSON.stringify({usernames:list})
+                });
+                var d = await res.json();
+                if (!res.ok) {
+                    showToast((d && (d.error||d.message)) || ('start '+res.status));
+                    applyJobButtons(false);
+                } else {
+                    showToast('已开始，本批先跑 '+Math.min(MAX_BATCH, list.length)+'，其余进队列');
+                    paintJobResults(d.job || {total:list.length, done:0, queue_left:Math.max(0,list.length-MAX_BATCH), batch_work:Math.min(MAX_BATCH,list.length), running:true, results:[]});
+                }
+            } catch(e) {
+                showToast('开始失败: '+e);
+                applyJobButtons(false);
+            }
+            jobUiLock = false;
+            attachJobPoll();
+        }
+
         async function stopCheck() {
             shouldStop = true;
-            isChecking = false;
-            try {
-                await apiCall('/api/check/job/stop', 'POST', {});
-            } catch (e) {}
-            var a = document.getElementById('startCheckBtn');
-            var b = document.getElementById('stopCheckBtn');
-            if (a) a.classList.remove('hidden');
-            if (b) b.classList.add('hidden');
+            applyJobButtons(false);
             showToast('已停止');
+            var token = localStorage.getItem('tg_auth_key') || 'fe570f573d2840308f6a298daa3ad4a0';
+            try { await fetch('/api/check/job/stop', {method:'POST', headers:{'Authorization':'Bearer '+token}}); } catch(e){}
         }
 
         function attachJobPoll() {
-            if (window.jobPollTimer) clearInterval(window.jobPollTimer);
-            window.jobPollTimer = setInterval(syncCheckJob, 2000);
-            syncCheckJob();
+            if (jobPollTimer) return;
+            jobPollTimer = setInterval(async function(){
+                if (jobUiLock) return;
+                try {
+                    var d = await apiCall('/api/check/job/status');
+                    if (d) { paintJobResults(d); applyJobButtons(!!d.running); }
+                } catch(e){}
+            }, 1500);
         }
-        
-        function paintJobMeters(d) {
-            if (!d) return;
-            const total = Number(d.total || 0);
-            const done = Number(d.done || 0);
-            const leftAll = Math.max(0, total - done);
-            const batchSize = 300;
-            const running = !!d.running;
-            const batchWork = running ? Math.min(batchSize, leftAll) : 0;
-            const queueLeft = running ? Math.max(0, leftAll - batchWork) : 0;
-            const available = Number(d.available || 0);
-            const premium = Number(d.premium || 0);
-            const deleted = Number(d.deleted || 0);
+        setTimeout(function(){ try{ attachJobPoll(); }catch(e){} }, 400);
 
-            function fillCard(labelText, value) {
-                const cards = document.querySelectorAll('.stat-card, .card, div');
-                for (const card of cards) {
-                    const lab = card.querySelector('.label');
-                    if (!lab) continue;
-                    const t = (lab.textContent || '').replace(/\s+/g, '');
-                    if (t === labelText.replace(/\s+/g, '')) {
-                        const num = card.querySelector('.number');
-                        if (num) num.textContent = String(value);
-                        return true;
-                    }
-                }
-                return false;
-            }
-            fillCard('总导入', total);
-            fillCard('本批工作', batchWork);
-            fillCard('队列剩余', queueLeft);
-            fillCard('可用', available);
-            fillCard('会员', premium);
-            fillCard('已删除', deleted);
-            fillCard('检测中', running ? batchWork : 0);
 
-            let line = document.getElementById('jobSummaryLine');
-            if (!line) {
-                document.querySelectorAll('div,p,span').forEach(function (el) {
-                    if (line) return;
-                    const raw = el.textContent || '';
-                    if (el.children.length === 0 && raw.indexOf('总导入') >= 0 && raw.indexOf('本批') >= 0 && raw.length < 80) {
-                        el.id = 'jobSummaryLine';
-                        line = el;
-                    }
-                });
-            }
-            if (line) line.textContent = '总导入 ' + total + ' · 本批工作 ' + batchWork + ' · 队列剩余 ' + queueLeft;
 
-            const bar = document.getElementById('botWorkStatus');
-            if (bar) bar.textContent = (d.message || '') + ' · 完成 ' + done + '/' + total + ' · 本批' + batchWork + ' · 剩余 ' + queueLeft;
-            window.jobMeta = d;
-        }
 
-        async function syncCheckJob() {
-            try {
-                const d = await apiCall('/api/check/job/status');
-                if (!d) return;
-                window.jobMeta = d;
-                if (Array.isArray(d.results) && d.results.length) {
-                    checkResults = d.results;
-                    if (typeof renderCheckResults === 'function') {
-                        try { renderCheckResults(); } catch (e) {}
-                    }
-                }
-                paintJobMeters(d);
-                const startBtn = document.getElementById('startCheckBtn');
-                const stopBtn = document.getElementById('stopCheckBtn');
-                if (d.running) {
-                    if (startBtn) startBtn.classList.add('hidden');
-                    if (stopBtn) stopBtn.classList.remove('hidden');
-                } else {
-                    if (startBtn) startBtn.classList.remove('hidden');
-                    if (stopBtn) stopBtn.classList.add('hidden');
-                }
-            } catch (e) {}
-        }
-        setTimeout(function(){ try { attachJobPoll(); } catch(e){} }, 800);
 
         async function startCheck() {
             const input = document.getElementById('usernameInput').value.trim();
@@ -1287,7 +1302,7 @@
             document.getElementById('checkStats').style.display = 'grid';
             document.getElementById('checkResultsSection').style.display = 'block';
 
-            checkResults = usernames.map(u => ({ username: u, status: 'pending', time: null }));
+            checkResults = sanitizeJobRows(dedupeCheckResults(usernames.map(u => ({ username: u, status: 'pending', time: null }))));
             updateCheckStats(); renderCheckResults();
 
             const delay = parseInt(document.getElementById('delayInput').value) || 1000;
@@ -1372,7 +1387,25 @@
             try { updateCheckStats(); if (typeof renderCheckResults === 'function') renderCheckResults(); } catch (e) {}
         }
         /* old stopCheck removed */
-        function clearCheck() { checkResults = []; document.getElementById('usernameInput').value = ''; document.getElementById('progressBar').classList.remove('active'); document.getElementById('checkStats').style.display = 'grid'; document.getElementById('checkResultsSection').style.display = 'none'; updateCheckStats(); }
+        function clearCheck() { checkResults = sanitizeJobRows(dedupeCheckResults([])); document.getElementById('usernameInput').value = ''; document.getElementById('progressBar').classList.remove('active'); document.getElementById('checkStats').style.display = 'grid'; document.getElementById('checkResultsSection').style.display = 'none'; updateCheckStats(); }
+
+        
+        function dedupeCheckResults(list) {
+            var seen = {};
+            var out = [];
+            (list || []).forEach(function(r){
+                if (!r) return;
+                var k = String(r.username || '').replace(/^@/, '').toLowerCase();
+                if (!k) return;
+                if (seen[k] !== undefined) {
+                    out[seen[k]] = r;
+                } else {
+                    seen[k] = out.length;
+                    out.push(r);
+                }
+            });
+            return out;
+        }
 
         function updateCheckStats() {
             const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
@@ -1402,34 +1435,145 @@
             }
         }
 
-        function statusLabel(status, premium) {
-            if (premium) return { text: '会员', color: '#ffc107' };
-            const map = {
-                clean: { text: '可用', color: 'var(--success)' },
-                taken: { text: '可用', color: 'var(--success)' },
-                available: { text: '未注册', color: '#607d8b' },
-                ad: { text: '广告', color: '#ff5722' },
-                spam: { text: '水军', color: '#795548' },
-                inactive: { text: '长期未在线', color: '#9e9e9e' },
-                deleted: { text: '已注销', color: '#9c27b0' },
-                invalid: { text: '无效', color: 'var(--warning)' },
-                error: { text: '错误', color: 'var(--text-secondary)' },
-                flood: { text: '限流', color: '#ff9800' },
-                checking: { text: '检测中', color: 'var(--warning)' },
-                pending: { text: '等待', color: 'var(--text-secondary)' },
-                unavailable: { text: '非个人', color: '#607d8b' }
-            };
-            return map[status] || { text: status || '-', color: 'var(--text)' };
+        
+        
+        function sanitizeJobRows(rows) {
+            rows = rows || [];
+            return rows.filter(function(r){
+                var st = String((r&&r.status)||'');
+                var er = String((r&&r.error)||'');
+                if (st === 'flood' || st === 'retry_session') return false;
+                if (er.indexOf('FloodWait') >= 0) return false;
+                if (er.indexOf('未授权') >= 0) return false;
+                if (er.toLowerCase().indexOf('session') >= 0) return false;
+                return true;
+            });
         }
 
-        function renderCheckResults(filter = 'all') {
+        function statusLabel(status, premium, extra) {
+            if (premium && status !== 'deleted' && status !== 'frozen') return { text: '会员', color: '#ffc107' };
+            var map = {
+                clean: { text: '可用', color: '#22c55e' },
+                taken: { text: '可用', color: '#22c55e' },
+                available: { text: '未注册', color: '#94a3b8' },
+                ad: { text: '广告', color: '#ff5722' },
+                spam: { text: '水军号', color: '#fb923c' },
+                frozen: { text: '冻结', color: '#38bdf8' },
+                inactive: { text: '长期未在线', color: '#9e9e9e' },
+                deleted: { text: '已注销', color: '#c084fc' },
+                invalid: { text: '无效', color: '#f59e0b' },
+                unavailable: { text: '非个人', color: '#64748b' },
+                flood: { text: '限流', color: '#f97316' },
+                error: { text: '错误', color: '#60a5fa' },
+                retry_session: { text: '换号中', color: '#64748b' },
+                checking: { text: '检测中', color: '#38bdf8' },
+                pending: { text: '等待', color: '#94a3b8' }
+            };
+            if (extra && extra.label) return { text: extra.label, color: (map[status]||{}).color || '#e5e7eb' };
+            return map[status] || { text: status || '-', color: '#e5e7eb' };
+        }
+        function renderCheckResults(filter) {
+            checkResults = sanitizeJobRows(checkResults);
+
+            filter = filter || window._checkFilter || 'all';
+            window._checkFilter = filter;
+            var list = checkResults || [];
+            var data = list;
+            if (filter === 'available') data = list.filter(function(r){ return r.status==='available'; });
+            else if (filter === 'clean') data = list.filter(function(r){ return r.status==='clean' || r.collect; });
+            else if (filter === 'premium') data = list.filter(function(r){ return !!r.premium; });
+            else if (filter === 'ad') data = list.filter(function(r){ return r.status==='ad' || r.is_ad; });
+            else if (filter === 'spam') data = list.filter(function(r){ return r.status==='spam' || r.is_spam; });
+            else if (filter === 'frozen') data = list.filter(function(r){ return r.status==='frozen'; });
+            else if (filter === 'deleted') data = list.filter(function(r){ return r.status==='deleted'; });
+            var box = document.getElementById('checkResultsList');
+            if (!box) return;
+            if (!data.length) {
+                box.innerHTML = '<div style="padding:12px 16px;color:var(--text-secondary)">暂无结果</div>';
+                return;
+            }
+            box.innerHTML = data.map(function(r){
+                var s = statusLabel(r.status, r.premium, r);
+                var err = '';
+                if (r.status==='error' && r.error && String(r.error).indexOf('未授权')<0) err = ' · ' + r.error;
+                return '<div style="padding:10px 16px;border-bottom:1px solid var(--border);font-size:14px;display:flex;justify-content:space-between;align-items:center">'
+                    + '<span style="font-family:monospace">@'+(r.username||'').replace(/^@/,'')+(r.premium?' ★':'')+'</span>'
+                    + '<span style="color:'+s.color+';font-size:12px;font-weight:600">'+s.text+err+'</span></div>';
+            }).join('');
+        }
+        
+        async function refreshBotWorkStatus() {
+            try {
+                var d = await apiCall('/api/bots/work_status');
+                var s = (d && d.summary) || {};
+                var work = s.work || 0;
+                var cool = s.cooldown || 0;
+                var cap = s.daily_capped || 0;
+                var used = 0;
+                (d.bots || []).forEach(function(b){ used += Number(b.daily_used || 0); });
+                if (d.today_used != null) used = d.today_used;
+                var map = {
+                    dsWork: work, checkWork: work, statWork: work,
+                    dsCool: cool, checkCool: cool, statCool: cool, dsCooldown: cool,
+                    dsCapped: cap, checkCapped: cap, statCapped: cap, dsFull: cap,
+                    dsToday: used, checkToday: used, statToday: used, dsDetectToday: used
+                };
+                Object.keys(map).forEach(function(id){
+                    var el = document.getElementById(id);
+                    if (el) el.textContent = map[id];
+                });
+                // 按卡片文案兜底：工作中/冷却中/今日已满/今日检测
+                document.querySelectorAll('#tab-check .stat-card, #detectStatusBar .stat-card, .detect-meter .stat-card').forEach(function(card){
+                    var lab = ((card.querySelector('.label')||{}).textContent||'').trim();
+                    var num = card.querySelector('.number');
+                    if (!num) return;
+                    if (lab === '工作中' || lab === '工作') num.textContent = work;
+                    else if (lab === '冷却中' || lab === '冷却') num.textContent = cool;
+                    else if (lab === '今日已满' || lab === '日额满') num.textContent = cap;
+                    else if (lab === '今日检测') num.textContent = used;
+                });
+                var txt = '工作 '+work+' · 冷却 '+cool+' · 日额满 '+cap+' · 每批≤300';
+                document.querySelectorAll('#botWorkStatus').forEach(function(n){ n.textContent = txt; });
+            } catch (e) {}
+        }
+        setInterval(function(){ try{ refreshBotWorkStatus(); }catch(e){} }, 5000);
+        setTimeout(function(){ try{ refreshBotWorkStatus(); }catch(e){} }, 300);
+
+        async function saveCheckPool() {
+            var raw = ((document.getElementById('usernameInput')||{}).value||'');
+            var list = raw.split(/\r?\n/).map(function(u){return u.trim().replace(/^@/,'');}).filter(Boolean);
+            try {
+                var d = await apiCall('/api/check/pool','POST',{usernames:list});
+                showToast('检测池已保存 '+ (d.total||list.length) +' 条');
+                var h = document.getElementById('checkPoolHint'); if(h) h.textContent = '池内 '+(d.total||list.length)+' 条';
+            } catch(e) { showToast(e.message||'保存失败'); }
+        }
+        async function loadCheckPool() {
+            try {
+                var d = await apiCall('/api/check/pool');
+                var arr = d.usernames || [];
+                document.getElementById('usernameInput').value = arr.join('\n');
+                showToast('已载入检测池 '+arr.length+' 条');
+                var h = document.getElementById('checkPoolHint'); if(h) h.textContent = '池内 '+arr.length+' 条';
+            } catch(e) { showToast(e.message||'载入失败'); }
+        }
+        function clearCheckPoolAll() {
+            var box = document.getElementById('usernameInput');
+            if (box) box.value = '';
+            apiCall('/api/check/pool','DELETE',{}).then(function(){ showToast('检测池和输入框已清空'); }).catch(function(){ showToast('输入框已清空'); });
+            var h = document.getElementById('checkPoolHint'); if(h) h.textContent = '池内 0 条';
+        }
+
+        function renderCheckResults(_unusedfilter = 'all') {
+            checkResults = sanitizeJobRows(dedupeCheckResults(checkResults));
+
             let data = checkResults;
             if (filter === 'available') data = checkResults.filter(r => r.status === 'available');
             else if (filter === 'taken') data = checkResults.filter(r => r.status === 'taken');
             else if (filter === 'premium') data = checkResults.filter(r => r.premium && r.status === 'taken');
             else if (filter === 'deleted') data = checkResults.filter(r => r.status === 'deleted');
             document.getElementById('checkResultsList').innerHTML = data.map(r => {
-                const s = statusLabel(r.status, r.premium);
+                const s = statusLabel(r.status, r.premium, r.error);
                 return `<div style="padding:10px 16px;border-bottom:1px solid var(--border);font-size:14px;display:flex;justify-content:space-between;align-items:center">
                     <span style="font-family:monospace;color:var(--text)">@${r.username}${r.premium ? ' ⭐' : ''}</span>
                     <span style="color:${s.color};font-size:12px;font-weight:600">${s.text}</span>
@@ -1559,7 +1703,7 @@
                     seen.add(lower);
                     return true;
                 });
-                checkResults = results;
+                checkResults = sanitizeJobRows(dedupeCheckResults(results));
                 document.getElementById('checkStats').style.display = 'grid';
                 document.getElementById('checkResultsSection').style.display = 'block';
                 updateCheckStats();
@@ -1606,7 +1750,7 @@
             // 从检测结果中删除包含这些关键词的用户名
             const before = checkResults.length;
             const deleted = checkResults.filter(r => matchesBlacklist(r.username, keywords.map(k => k.toLowerCase())));
-            checkResults = checkResults.filter(r => !matchesBlacklist(r.username, keywords.map(k => k.toLowerCase())));
+            checkResults = sanitizeJobRows(dedupeCheckResults(checkResults.filter(r => !matchesBlacklist(r.username, keywords.map(k => k.toLowerCase())))));
             const removedCount = before - checkResults.length;
             // 显示删除的用户名
             document.getElementById('deletedCount').textContent = `(共 ${removedCount} 个)`;
@@ -1830,46 +1974,11 @@
 
         
         
-        setTimeout(function(){ try{ placeKeywordPanelOnly(); }catch(e){} }, 500);
+        setTimeout(function(){ try{ try{placeKeywordPanelOnly();}catch(e){} }catch(e){} }, 500);
         
-        setTimeout(function(){ try{ placeKeywordPanelOnly(); }catch(e){} }, 500);
-        function placeKeywordPanelOnly() {
-            try {
-                var active = document.querySelector('.tab.active');
-                var name = active ? active.getAttribute('data-tab') : '';
-                var nodes = [];
-                document.querySelectorAll('div').forEach(function (el) {
-                    var t = el.innerText || '';
-                    if (t.indexOf('已保存的过滤关键词') >= 0 && t.indexOf('添加过滤关键词') >= 0 && t.indexOf('关键词过滤') >= 0 && t.length < 2200) {
-                        nodes.push(el);
-                    }
-                });
-                // 去掉被包含的子节点
-                nodes = nodes.filter(function (el) {
-                    return !nodes.some(function (o) { return o !== el && o.contains(el); });
-                });
-                var host = document.getElementById('tab-keyword');
-                if (!host) {
-                    host = document.createElement('div');
-                    host.id = 'tab-keyword';
-                    host.className = 'tab-content';
-                    host.style.display = 'none';
-                    (document.getElementById('mainContent') || document.body).appendChild(host);
-                }
-                nodes.forEach(function (el, i) {
-                    if (i === 0 && !host.contains(el)) {
-                        host.appendChild(el);
-                    } else if (i > 0) {
-                        el.style.display = 'none';
-                    }
-                });
-                // 非 keyword 页隐藏 host 内容视觉：host 本身由 switchTab 控制
-                if (name !== 'keyword') {
-                    host.style.display = 'none';
-                    host.classList.remove('active');
-                }
-            } catch (e) { console.error(e); }
-        }
+        setTimeout(function(){ try{ try{placeKeywordPanelOnly();}catch(e){} }catch(e){} }, 500);
+        function placeKeywordPanelOnly(){ return; }
+
 
         
         
@@ -1973,5 +2082,26 @@
         // Init
         checkAuth();
     </script>
+
+<script>
+(function(){
+  function bindStart(){
+    document.querySelectorAll('button').forEach(function(btn){
+      if ((btn.textContent||'').indexOf('开始检测') === -1) return;
+      if (btn.getAttribute('data-bind-start')==='1') return;
+      btn.setAttribute('data-bind-start','1');
+      btn.addEventListener('click', function(ev){
+        ev.preventDefault();
+        if (typeof startCheckQueued === 'function') startCheckQueued();
+        else alert('startCheckQueued missing');
+      }, true);
+    });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindStart);
+  else bindStart();
+  setTimeout(bindStart, 800);
+})();
+</script>
+
 </body>
 </html>

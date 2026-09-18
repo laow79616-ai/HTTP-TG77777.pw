@@ -35,6 +35,7 @@ PREMIUM_FILE = "/root/bot_agent/premium_usernames.json"
 
 SEEN_FILE = "/root/bot_agent/checked_history.json"
 SKIP_LOG_FILE = "/root/bot_agent/skip_history.json"
+CHECK_POOL_FILE = "/root/bot_agent/check_pool.json"
 TARGETS_FILE = "/root/bot_agent/target_usernames.json"
 SESSIONS_DIR = "/root/bot_agent/sessions"
 
@@ -219,41 +220,39 @@ def save_premium(usernames):
 # ============ 认证中间件 ============
 
 # 广告用户识别关键词（昵称/用户名命中则标记为广告）
+
 AD_KEYWORDS = [
-    "代理", "开户", "博彩", "网赌", "赌", "彩票", "六合", "时时彩",
-    "兼职", "日结", "刷单", "打字员", "招聘", "招代理",
-    "加微信", "加v", "加V", "威信", "薇信",
-    "优惠", "折扣", "促销", "免费领", "领取", "红包",
-    "约炮", "交友", "裸聊", "色情",
-    "币商", "换汇", "USDT", "承兑", "代付", "代收",
-    "出粉", "引流", "精准粉", "电报粉",
-    "赌场", "棋牌", "菠菜", "百乐", "视讯",
+    "主号", "代理", "担保", "收u", "收U", "出货", "出U", "卖", "微信", "威信", "薇信", "加v", "加V",
+    "飞机", "telegram", "赌博", "博彩", "反", "押金", "苹果", "手机", "折扣", "回收", "兑换",
+    "开户", "网赌", "赌", "彩票", "六合", "时时彩", "兼职", "日结", "刷单", "招聘", "招代理",
+    "优惠", "促销", "免费领", "红包", "约炮", "交友", "裸聊", "币商", "换汇", "usdt", "承兑",
+    "代付", "代收", "出粉", "引流", "精准粉", "电报粉", "赌场", "棋牌", "菠菜", "百乐", "视讯",
+    "一手", "数据", "探长", "五折", "走私", "线下",
 ]
 
 def is_ad_account(username, first_name="", last_name=""):
-    text = f"{username or ''} {first_name or ''} {last_name or ''}".lower()
+    text = ("%s %s %s" % (username or "", first_name or "", last_name or "")).lower()
     for kw in AD_KEYWORDS:
         if kw.lower() in text:
             return True
     return False
 
 def is_bot_like_username(username):
-    import re
+    import re as _re
     u = (username or "").strip().lstrip("@")
     if not u:
         return True
-    # 正常短用户名（如 durov）不算水军
     digits = sum(1 for ch in u if ch.isdigit())
+    letters = sum(1 for ch in u if ch.isalpha())
     if digits == 0 and len(u) <= 12:
         return False
-    if len(u) >= 12 and digits >= 5:
+    if len(u) >= 10 and digits >= 4:
         return True
-    # 英文名+至少5位数字：典型批量马甲
-    if re.match(r"^[A-Za-z]{3,}\d{5,}$", u):
+    if _re.match(r"^[A-Za-z]{2,}\d{4,}$", u):
         return True
-    if re.match(r"^[A-Za-z]{4,}[A-Za-z]+\d{5,}$", u):
+    if _re.search(r"\d{6,}", u):
         return True
-    if re.search(r"\d{6,}", u):
+    if letters >= 3 and digits >= 3 and len(u) >= 8:
         return True
     return False
 
@@ -279,6 +278,42 @@ def classify_last_online(status_obj):
         return "unknown"
     return "unknown"
 
+def is_frozen_user(user):
+    if user is None:
+        return False
+    if getattr(user, "restricted", False):
+        return True
+    if getattr(user, "restriction_reason", None):
+        return True
+    if getattr(user, "scam", False) or getattr(user, "fake", False):
+        return True
+    return False
+
+def classify_found_user(username, user):
+    fn = getattr(user, "first_name", "") or ""
+    ln = getattr(user, "last_name", "") or ""
+    premium = bool(getattr(user, "premium", False))
+    is_bot = bool(getattr(user, "bot", False))
+    if getattr(user, "deleted", False):
+        return {"username": username, "status": "deleted", "label": "已注销", "premium": False, "collect": False}
+    if is_frozen_user(user):
+        return {"username": username, "status": "frozen", "label": "冻结", "premium": premium, "collect": False, "first_name": fn, "last_name": ln}
+    ad = is_ad_account(username, fn, ln)
+    bot_like = is_bot_like_username(username) or is_bot
+    online_kind = classify_last_online(getattr(user, "status", None))
+    if ad:
+        st, collect, lab = "ad", False, "广告"
+    elif bot_like:
+        st, collect, lab = "spam", False, "水军号"
+    elif online_kind == "stale":
+        st, collect, lab = "inactive", False, "长期未在线"
+    else:
+        st, collect, lab = "clean", True, "可用"
+    return {
+        "username": username, "status": st, "label": lab, "premium": premium, "collect": collect,
+        "is_ad": ad, "is_spam": bot_like, "online": online_kind,
+        "first_name": fn, "last_name": ln, "user_id": getattr(user, "id", None),
+    }
 
 def load_api_pool():
     if os.path.exists(API_POOL_FILE):
@@ -402,6 +437,73 @@ def load_cooldown():
 def save_cooldown(data):
     import json
     json.dump(data, open(COOLDOWN_FILE, "w"), ensure_ascii=False, indent=2)
+
+
+def _bot_key(bot):
+    return bot.get("id") or bot.get("phone") or bot.get("session_path") or ""
+
+def inspect_bot_alive(bot, timeout=8):
+    """开工前体检：能否连接、是否授权、是否被冻。"""
+    from telethon import TelegramClient
+    from telethon.errors import FloodWaitError, AuthKeyError, UserDeactivatedError, UserDeactivatedBanError, SessionRevokedError
+    sp = bot.get("session_path")
+    if not sp:
+        return {"ok": False, "reason": "no_session"}
+    key = _bot_key(bot)
+    try:
+        api_id = int(bot.get("api_id") or 0)
+        api_hash = str(bot.get("api_hash") or "")
+        client = TelegramClient(sp, api_id, api_hash)
+        async def _t():
+            await client.connect()
+            try:
+                if not await client.is_user_authorized():
+                    return {"ok": False, "reason": "unauthorized"}
+                me = await client.get_me()
+                if not me:
+                    return {"ok": False, "reason": "no_me"}
+                if getattr(me, "restricted", False) or getattr(me, "deleted", False):
+                    return {"ok": False, "reason": "frozen"}
+                return {"ok": True, "reason": "ok", "phone": getattr(me, "phone", None)}
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+        return run_async(_t()) or {"ok": False, "reason": "empty"}
+    except FloodWaitError as e:
+        set_bot_cooldown(key, int(e.seconds or 3600), reason="FloodWait-precheck")
+        return {"ok": False, "reason": "flood", "seconds": int(e.seconds or 0)}
+    except (UserDeactivatedError, UserDeactivatedBanError, SessionRevokedError, AuthKeyError) as e:
+        set_bot_cooldown(key, 86400, reason=type(e).__name__)
+        return {"ok": False, "reason": "frozen"}
+    except Exception as e:
+        return {"ok": False, "reason": type(e).__name__}
+
+def preflight_workable_bots(config=None):
+    """只保留：在线 + 未限流 + 未冻结。"""
+    cfg = config or load_config()
+    raw = list_workable_bots(cfg) if "list_workable_bots" in globals() else (cfg.get("bots") or [])
+    ok, bad = [], []
+    for b in raw:
+        r = inspect_bot_alive(b)
+        if r.get("ok"):
+            ok.append(b)
+        else:
+            bad.append({"phone": b.get("phone"), "reason": r.get("reason")})
+            print("[preflight]", b.get("phone"), r)
+    return ok, bad
+
+def is_target_frozen(user, err_text=""):
+    if user is not None:
+        if getattr(user, "deleted", False):
+            return True
+        if getattr(user, "restricted", False) and not getattr(user, "premium", False):
+            # restricted 且非会员，当冻结/限制号剔除
+            return True
+    t = (err_text or "")
+    keys = ("USER_DEACTIVATED", "USER_BANNED", "USER_RESTRICTED", "FROZEN", "deactivated", "banned")
+    return any(k.lower() in t.lower() for k in keys)
 
 def set_bot_cooldown(bot_key, seconds, reason="FloodWait"):
     import time
@@ -1054,7 +1156,7 @@ async def async_check_one_username(client, username):
     except UsernameInvalidError:
         return {"username": username, "status": "invalid", "premium": False}
     except FloodWaitError as e:
-        return {"username": username, "status": "error", "error": f"FloodWait {e.seconds}s", "premium": False}
+        return {"username": username, "status": "flood", "error": f"FloodWait {e.seconds}s", "_flood_seconds": int(e.seconds), "premium": False}
     except Exception as e:
         err = str(e)
         if "No user has" in err or "USERNAME_NOT_OCCUPIED" in err:
@@ -1255,9 +1357,31 @@ def _check_job_worker():
                 data = {"username": username, "status": "error", "error": str(e)[:160], "premium": False}
             data = data or {}
             data.setdefault("username", username)
+            st0 = str(data.get("status") or "")
+            err0 = str(data.get("error") or "")
+            if st0 in ("retry_session", "flood") or "FloodWait" in err0 or "未授权" in err0 or "session" in err0.lower():
+                with JOB_LOCK:
+                    q = CHECK_JOB.get("queue") or []
+                    if username not in q:
+                        CHECK_JOB["queue"] = [username] + list(q)
+                    CHECK_JOB["message"] = "水军故障换号，用户退回队列"
+                    CHECK_JOB["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                continue
+
             with JOB_LOCK:
-                CHECK_JOB["results"].append(data)
-                CHECK_JOB["done"] = int(CHECK_JOB.get("done") or 0) + 1
+                uname = (data.get("username") or username or "").strip().lstrip("@").lower()
+                rows = CHECK_JOB.get("results") or []
+                exist = False
+                for i, r in enumerate(rows):
+                    ru = str((r or {}).get("username") or "").strip().lstrip("@").lower()
+                    if ru and ru == uname:
+                        rows[i] = data
+                        exist = True
+                        break
+                if not exist:
+                    rows.append(data)
+                CHECK_JOB["results"] = rows
+                CHECK_JOB["done"] = len(rows)
                 CHECK_JOB["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 left_q = len(CHECK_JOB.get("queue") or [])
                 CHECK_JOB["message"] = "本批工作中 · 完成 %s/%s · 队列剩余 %s" % (
@@ -1271,43 +1395,6 @@ def _check_job_worker():
                 _sleep(1.2)
         # 本批结束，下一轮 while 再从剩余取300
 
-@app.route("/api/check/job/start", methods=["POST"])
-@require_auth
-def api_check_job_start():
-    data = request.json or {}
-    raw = data.get("usernames") or data.get("text") or ""
-    if isinstance(raw, str):
-        usernames = [x.strip().lstrip("@") for x in raw.replace("\r", "\n").split("\n") if x.strip()]
-        usernames, _dedup_stats = filter_job_usernames(usernames)
-    else:
-        usernames = [str(x).strip().lstrip("@") for x in raw if str(x).strip()]
-        usernames, _dedup_stats = filter_job_usernames(usernames)
-    # 去重保序
-    seen = set()
-    uniq = []
-    for u in usernames:
-        k = u.lower()
-        if k in seen:
-            continue
-        seen.add(k)
-        uniq.append(u)
-    if not uniq:
-        return jsonify({"error": "没有用户名"}), 400
-    with JOB_LOCK:
-        if CHECK_JOB["running"]:
-            return jsonify({"error": "已有任务在后台运行", "job": _job_snapshot()}), 409
-        CHECK_JOB["running"] = True
-        CHECK_JOB["should_stop"] = False
-        CHECK_JOB["queue"] = uniq[:]
-        CHECK_JOB["results"] = []
-        CHECK_JOB["total"] = len(uniq)
-        CHECK_JOB["done"] = 0
-        CHECK_JOB["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        CHECK_JOB["updated_at"] = CHECK_JOB["started_at"]
-        CHECK_JOB["message"] = "后台任务已启动"
-    t = threading.Thread(target=_check_job_worker, daemon=True)
-    t.start()
-    return jsonify({"success": True, "job": _job_snapshot()})
 
 
 @app.route("/api/check/job/export", methods=["GET"])
@@ -1391,6 +1478,90 @@ def api_check_job_export_json():
     return jsonify({"success": True, "type": kind, "total": len(uniq), "usernames": uniq})
 
 
+
+
+@app.route("/api/check/pool", methods=["GET"])
+@require_auth
+def api_check_pool_get():
+    import os, json
+    path = globals().get("CHECK_POOL_FILE") or "/root/bot_agent/check_pool.json"
+    if os.path.exists(path):
+        try:
+            data = json.load(open(path, encoding="utf-8"))
+        except Exception:
+            data = []
+    else:
+        data = []
+    if isinstance(data, dict):
+        data = data.get("usernames") or []
+    return jsonify({"success": True, "total": len(data), "usernames": data})
+
+@app.route("/api/check/pool", methods=["POST"])
+@require_auth
+def api_check_pool_save():
+    import json
+    path = globals().get("CHECK_POOL_FILE") or "/root/bot_agent/check_pool.json"
+    body = request.get_json(silent=True) or {}
+    raw = body.get("usernames") or body.get("text") or []
+    if isinstance(raw, str):
+        arr = [x.strip().lstrip("@") for x in raw.replace("\r","\n").split("\n") if x.strip()]
+    else:
+        arr = [str(x).strip().lstrip("@") for x in raw if str(x).strip()]
+    seen=set(); uniq=[]
+    for u in arr:
+        k=u.lower()
+        if k in seen: continue
+        seen.add(k); uniq.append(u)
+    json.dump(uniq, open(path,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
+    return jsonify({"success": True, "total": len(uniq)})
+
+@app.route("/api/check/pool", methods=["DELETE"])
+@require_auth
+def api_check_pool_clear():
+    import json
+    path = globals().get("CHECK_POOL_FILE") or "/root/bot_agent/check_pool.json"
+    json.dump([], open(path,"w",encoding="utf-8"))
+    return jsonify({"success": True, "total": 0})
+
+@app.route("/api/check/job/start", methods=["POST"])
+@require_auth
+def api_check_job_start():
+    data = request.get_json(silent=True) or request.json or {}
+    raw = data.get("usernames") or data.get("list") or data.get("text") or ""
+    if isinstance(raw, str):
+        usernames = [x.strip().lstrip("@") for x in raw.replace("\r", "\n").split("\n") if x.strip()]
+    else:
+        usernames = []
+        for x in (raw or []):
+            u = x.get("username") if isinstance(x, dict) else str(x)
+            u = (u or "").strip().lstrip("@")
+            if u:
+                usernames.append(u)
+    seen = set(); uniq = []
+    for u in usernames:
+        k = u.lower()
+        if k in seen: continue
+        seen.add(k); uniq.append(u)
+    if not uniq:
+        return jsonify({"success": False, "error": "没有用户名"}), 400
+    with JOB_LOCK:
+        # 旧任务卡死时允许强制接管
+        CHECK_JOB["running"] = True
+        CHECK_JOB["should_stop"] = False
+        CHECK_JOB["queue"] = uniq[:]
+        CHECK_JOB["results"] = []
+        CHECK_JOB["total"] = len(uniq)
+        CHECK_JOB["done"] = 0
+        CHECK_JOB["batch_size"] = 300
+        CHECK_JOB["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        CHECK_JOB["updated_at"] = CHECK_JOB["started_at"]
+        CHECK_JOB["message"] = "后台任务已启动 %s" % len(uniq)
+    t = threading.Thread(target=_check_job_worker, daemon=True)
+    t.start()
+    snap = _job_snapshot() if " _job_snapshot" in dir() or "_job_snapshot" in globals() else {"running": True, "total": len(uniq)}
+    return jsonify({"success": True, "running": True, "total": len(uniq), "job": snap})
+
+
 @app.route("/api/check/job/status", methods=["GET"])
 @require_auth
 def api_check_job_status():
@@ -1407,6 +1578,64 @@ def api_check_job_stop():
 
 @app.route('/api/check/one', methods=['POST'])
 @require_auth
+
+def _check_one_with_failover(username, bots):
+    last = None
+    flood_hits = 0
+    for bot in bots:
+        if flood_hits >= 3:
+            break
+        key = _bot_key(bot)
+        try:
+            out = None
+            if "async_check_one_username" in globals():
+                from telethon import TelegramClient
+                from telethon.errors import FloodWaitError
+                async def _run():
+                    client = TelegramClient(bot.get("session_path"), int(bot.get("api_id") or 0), str(bot.get("api_hash") or ""))
+                    await client.connect()
+                    try:
+                        if not await client.is_user_authorized():
+                            return {"username": username, "status": "error", "error": "session未授权", "_skip_write": True, "status": "retry_session", "collect": False}
+                        return await async_check_one_username(client, username)
+                    finally:
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
+                out = run_async(_run())
+            last = out or last
+            if not out:
+                continue
+            err = (out.get("error") or "") + str(out.get("status") or "")
+            if out.get("status") == "flood" or "FloodWait" in err:
+                flood_hits += 1
+                sec = int(out.get("_flood_seconds") or 0) or 3600
+                m = re.search(r"(\d+)", err)
+                if m and sec == 3600:
+                    try:
+                        sec = int(m.group(1))
+                    except Exception:
+                        pass
+                set_bot_cooldown(key, min(sec, 86400), "FloodWait")
+                print("[failover] flood", bot.get("phone"), "user", username, "sec", sec, "hit", flood_hits)
+                continue
+            if is_target_frozen(None, err) or out.get("status") in ("frozen", "deleted"):
+                out["collect"] = False
+                if out.get("status") not in ("deleted",):
+                    out["status"] = "frozen"
+                return out
+            return out
+        except Exception as e:
+            last = {"username": username, "status": "error", "error": str(e)[:160], "collect": False}
+            if "FloodWait" in str(e):
+                flood_hits += 1
+                set_bot_cooldown(key, 3600, "FloodWait")
+                continue
+    if flood_hits >= 3:
+        return {"username": username, "status": "skip_flood", "error": "连续3次限流，本条跳过", "collect": False, "premium": False}
+    return last or {"username": username, "status": "error", "error": "无可用水军", "collect": False}
+
 def api_check_one():
     """检测单个用户名：只用水军工作池；FloodWait 写入冷却仓；尊重每日上限"""
     import time, asyncio
@@ -1471,13 +1700,37 @@ def api_check_one():
                             save_config(cfg2)
                         except Exception:
                             pass
-                        return {"username": username, "status": "error", "error": "session未授权", "premium": False, "collect": False, "_bot": bot_key}
+                        return {"username": username, "status": "retry_session", "error": "session未授权", "_skip_write": True, "status": "retry_session", "premium": False, "collect": False, "_bot": bot_key, "_skip_write": True}
                     try:
                         result = await asyncio.wait_for(client(ResolveUsernameRequest(username)), timeout=8)
                     except FloodWaitError as e:
                         return {"username": username, "status": "flood", "error": f"FloodWait {e.seconds}s", "premium": False, "collect": False, "_flood_seconds": int(e.seconds), "_bot": bot_key}
                     except UsernameNotOccupiedError:
-                        return {"username": username, "status": "available", "premium": False, "collect": False, "_bot": bot_key}
+                        try:
+                            ent = await asyncio.wait_for(client.get_entity(username), timeout=8)
+                            et = type(ent).__name__
+                            if et == "User" or getattr(ent, "first_name", None) is not None:
+                                user = ent
+                                if getattr(user, "deleted", False):
+                                    return {"username": username, "status": "deleted", "premium": False, "collect": False, "_bot": bot_key}
+                                fn = getattr(user, "first_name", "") or ""
+                                ln = getattr(user, "last_name", "") or ""
+                                premium = bool(getattr(user, "premium", False))
+                                is_bot = bool(getattr(user, "bot", False))
+                                ad = is_ad_account(username, fn, ln) if "is_ad_account" in globals() else False
+                                bot_like = (is_bot_like_username(username) if "is_bot_like_username" in globals() else False) or is_bot
+                                if ad:
+                                    st, collect = "ad", False
+                                elif bot_like:
+                                    st, collect = "spam", False
+                                else:
+                                    st, collect = "clean", True
+                                return {"username": username, "status": st, "premium": premium, "collect": collect, "is_ad": ad, "is_spam": bot_like, "first_name": fn, "last_name": ln, "_bot": bot_key}
+                            return {"username": username, "status": "unavailable", "premium": False, "collect": False, "entity_type": et, "_bot": bot_key}
+                        except UsernameNotOccupiedError:
+                            return {"username": username, "status": "available", "premium": False, "collect": False, "_bot": bot_key}
+                        except Exception as _e:
+                            return {"username": username, "status": "error", "error": str(_e)[:120], "premium": False, "collect": False, "_bot": bot_key}
                     except UsernameInvalidError:
                         return {"username": username, "status": "invalid", "premium": False, "collect": False, "_bot": bot_key}
 
@@ -1543,6 +1796,12 @@ def api_check_one():
                 continue
 
             # FloodWait → 冷却仓，换号或返回
+            if out.get('status') in ('retry_session',) or out.get('_skip_write'):
+                last_err = out.get('error') or 'session未授权'
+                continue
+            if out.get("status") in ("retry_session",) or out.get("_skip_write"):
+                last_err = out.get("error") or "session未授权"
+                continue
             if out.get('status') == 'flood' or (out.get('error') or '').startswith('FloodWait'):
                 sec = int(out.get('_flood_seconds') or 0)
                 if not sec:
@@ -1576,7 +1835,7 @@ def api_check_one():
     return jsonify({
         "username": username,
         "status": "error",
-        "error": last_err or "水军未授权或session失效",
+        "error": last_err or "水军未授权或session失效", "label": "错误",
         "premium": False,
         "collect": False,
     })
@@ -1818,39 +2077,44 @@ def api_export_targets():
     t = load_targets()
     return "\n".join(t), 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-@app.route('/api/targets/result', methods=['POST'])
+
+@app.route("/api/targets/result", methods=["POST"])
 @require_auth
 def api_targets_result():
-    """只写入干净活跃用户（非广告/非水军/非销号/非长期未在线）"""
     data = request.json or {}
-    items = data.get("targets") or data.get("results") or data.get("usernames") or []
-    targets = load_targets()
-    existing = {str(x).lower().lstrip("@") for x in targets}
+    items = data.get("targets") or data.get("usernames") or data.get("list") or []
+    if isinstance(items, str):
+        items = [x.strip() for x in items.replace("\r", "\n").split("\n") if x.strip()]
+    targets = load_targets() if "load_targets" in globals() else []
+    if not isinstance(targets, list):
+        targets = []
     added = 0
+    skip_status = ("frozen", "deleted", "spam", "ad", "skip_flood", "flood", "error", "invalid", "unavailable")
     for item in items:
+        st = ""
+        username = ""
+        collect = None
         if isinstance(item, dict):
-            st = (item.get("status") or "").lower()
-            if st in ("ad", "spam", "inactive", "deleted", "available", "invalid", "error", "flood", "unavailable"):
+            st = str(item.get("status") or "")
+            collect = item.get("collect")
+            username = (item.get("username") or item.get("user") or "").strip().lstrip("@")
+            if item.get("status") in skip_status:
                 continue
-            if item.get("is_ad") or item.get("is_spam"):
+            if collect is False:
                 continue
-            if item.get("collect") is False and st != "clean":
+            if st and st not in ("clean", "taken"):
                 continue
-            if st not in ("clean", "taken") and not item.get("collect"):
-                continue
-            username = (item.get("username") or "").strip().lstrip("@")
         else:
-            continue
+            username = str(item).strip().lstrip("@")
         if not username:
             continue
-        key = username.lower()
-        if key in existing:
-            continue
-        targets.append("@" + username)
-        existing.add(key)
-        added += 1
+        formatted = "@" + username
+        if formatted not in targets:
+            targets.append(formatted)
+            added += 1
     save_targets(targets)
     return jsonify({"success": True, "added": added, "total": len(targets)})
+
 
 @app.route('/api/premium', methods=['GET'])
 @require_auth
