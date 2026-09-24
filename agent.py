@@ -1567,6 +1567,23 @@ def api_check_job_start():
 def api_check_job_status():
     return jsonify(_job_snapshot())
 
+
+@app.route("/api/check/job/clear", methods=["POST"])
+@require_auth
+def api_check_job_clear():
+    with JOB_LOCK:
+        CHECK_JOB["running"] = False
+        CHECK_JOB["should_stop"] = True
+        CHECK_JOB["queue"] = []
+        CHECK_JOB["results"] = []
+        CHECK_JOB["total"] = 0
+        CHECK_JOB["done"] = 0
+        CHECK_JOB["batch_size"] = 300
+        CHECK_JOB["message"] = "已清空"
+        CHECK_JOB["started_at"] = None
+        CHECK_JOB["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return jsonify({"success": True, "job": _job_snapshot()})
+
 @app.route("/api/check/job/stop", methods=["POST"])
 @require_auth
 def api_check_job_stop():

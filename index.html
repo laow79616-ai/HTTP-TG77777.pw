@@ -1387,9 +1387,29 @@
             try { updateCheckStats(); if (typeof renderCheckResults === 'function') renderCheckResults(); } catch (e) {}
         }
         /* old stopCheck removed */
-        function clearCheck() { checkResults = sanitizeJobRows(dedupeCheckResults([])); document.getElementById('usernameInput').value = ''; document.getElementById('progressBar').classList.remove('active'); document.getElementById('checkStats').style.display = 'grid'; document.getElementById('checkResultsSection').style.display = 'none'; updateCheckStats(); }
-
         
+        async function clearCheck() {
+            shouldStop = true;
+            checkResults = [];
+            usernameQueue = [];
+            queueTotalAll = 0;
+            queueDoneAll = 0;
+            var box = document.getElementById('usernameInput');
+            if (box) box.value = '';
+            var set = function(id,v){ var el=document.getElementById(id); if(el) el.textContent=v; };
+            set('checkTotal',0); set('checkAvailable',0); set('checkPremium',0);
+            set('checkDeleted',0); set('checkPending',0); set('checkWorking',0);
+            set('checkBatch',0); set('checkQueueLeft',0);
+            var line = document.getElementById('queueSummary') || document.getElementById('queueSummaryAuto');
+            if (line) line.textContent = '总导入 0 · 本批工作 0 · 队列剩余 0';
+            var list = document.getElementById('checkResultsList');
+            if (list) list.innerHTML = '';
+            var token = localStorage.getItem('tg_auth_key') || 'fe570f573d2840308f6a298daa3ad4a0';
+            try { await fetch('/api/check/job/stop', {method:'POST', headers:{'Authorization':'Bearer '+token}}); } catch(e){}
+            try { await fetch('/api/check/job/clear', {method:'POST', headers:{'Authorization':'Bearer '+token}}); } catch(e){}
+            showToast('面板和后台任务已清零');
+        }
+
         function dedupeCheckResults(list) {
             var seen = {};
             var out = [];
