@@ -230,12 +230,26 @@ AD_KEYWORDS = [
     "一手", "数据", "探长", "五折", "走私", "线下",
 ]
 
+
+
 def is_ad_account(username, first_name="", last_name=""):
-    text = ("%s %s %s" % (username or "", first_name or "", last_name or "")).lower()
-    for kw in AD_KEYWORDS:
-        if kw.lower() in text:
+    text = " ".join([
+        str(username or ""),
+        str(first_name or ""),
+        str(last_name or ""),
+    ]).lower()
+    keys = [
+        "代理", "招商", "赌博", "博彩", "赌场", "娱乐城", "威尼斯",
+        "贷款", "理财", "兑换", "代收", "代付", "回收", "担保",
+        "有需要", "老板", "主业", "看主业", "频道", "兼职",
+        "加我", "私聊", "飞机", "福利", "招代理", "推广",
+        "casino", "betting", "loan", "crypto exchange",
+    ]
+    for k in keys:
+        if k.lower() in text:
             return True
     return False
+
 
 def is_bot_like_username(username):
     import re as _re
@@ -246,8 +260,6 @@ def is_bot_like_username(username):
     if any(x in ul for x in ("bot", "agency", "official", "service", "promo")):
         return True
     if _re.search(r"\d{6,}", u):
-        return True
-    if _re.match(r"^[A-Za-z]{1,3}\d{6,}$", u):
         return True
     return False
 
@@ -269,8 +281,6 @@ def classify_last_online(status_obj):
         if datetime.now(timezone.utc) - was > timedelta(days=30):
             return "stale"
         return "active"
-    if name in ("UserStatusEmpty",):
-        return "unknown"
     return "unknown"
 
 def is_frozen_user(user):
@@ -285,32 +295,38 @@ def is_frozen_user(user):
     return False
 
 def classify_found_user(username, user):
+    """命中即停：deleted > frozen > premium > ad > spam > inactive > clean"""
     fn = getattr(user, "first_name", "") or ""
     ln = getattr(user, "last_name", "") or ""
     premium = bool(getattr(user, "premium", False))
     is_bot = bool(getattr(user, "bot", False))
+    # 1 已注销
     if getattr(user, "deleted", False):
         return {"username": username, "status": "deleted", "label": "已注销", "premium": False, "collect": False}
+    # 2 冻结
     if is_frozen_user(user):
         return {"username": username, "status": "frozen", "label": "冻结", "premium": premium, "collect": False, "first_name": fn, "last_name": ln}
-    ad = is_ad_account(username, fn, ln)
-    bot_like = is_bot_like_username(username) or is_bot
-    online_kind = classify_last_online(getattr(user, "status", None))
+    # 3 会员优先，可采集
     if premium:
-        st, collect, lab = "clean", True, "会员"
-    elif ad:
-        st, collect, lab = "ad", False, "广告"
-    elif bot_like:
-        st, collect, lab = "spam", False, "水军号"
-    elif online_kind == "stale":
-        st, collect, lab = "inactive", False, "长期未在线"
-    else:
-        st, collect, lab = "clean", True, "可用"
+        return {
+            "username": username, "status": "clean", "label": "会员", "premium": True, "collect": True,
+            "is_ad": False, "is_spam": False, "first_name": fn, "last_name": ln, "user_id": getattr(user, "id", None),
+        }
+    # 4 广告
+    if is_ad_account(username, fn, ln):
+        return {"username": username, "status": "ad", "label": "广告", "premium": False, "collect": False, "is_ad": True, "first_name": fn, "last_name": ln}
+    # 5 水军 / 官方bot（Djj7654 这种不误杀）
+    if is_bot or is_bot_like_username(username):
+        return {"username": username, "status": "spam", "label": "水军号", "premium": False, "collect": False, "is_spam": True, "first_name": fn, "last_name": ln}
+    # 6 长期未在线
+    if classify_last_online(getattr(user, "status", None)) == "stale":
+        return {"username": username, "status": "inactive", "label": "长期未在线", "premium": False, "collect": False, "first_name": fn, "last_name": ln}
+    # 9 干净个人号
     return {
-        "username": username, "status": st, "label": lab, "premium": premium, "collect": collect or premium,
-        "is_ad": ad, "is_spam": bot_like, "online": online_kind,
-        "first_name": fn, "last_name": ln, "user_id": getattr(user, "id", None),
+        "username": username, "status": "clean", "label": "可用", "premium": False, "collect": True,
+        "is_ad": False, "is_spam": False, "first_name": fn, "last_name": ln, "user_id": getattr(user, "id", None),
     }
+
 
 def load_api_pool():
     if os.path.exists(API_POOL_FILE):
@@ -510,6 +526,40 @@ def set_bot_cooldown(bot_key, seconds, reason="FloodWait"):
     save_cooldown(data)
     return until
 
+
+def load_authorized_phones():
+    import os, json
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "authorized_phones.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        data = json.load(open(path, encoding="utf-8"))
+        return set(str(x).strip() for x in data if str(x).strip())
+    except Exception:
+        return None
+
+def list_workable_bots(config=None):
+    if config is None:
+        config = load_config()
+    allow = load_authorized_phones()
+    out = []
+    for b in config.get("bots") or []:
+        phone = str(b.get("phone") or "").strip()
+        if allow is not None and phone not in allow:
+            continue
+        if not b.get("session_path"):
+            continue
+        key = b.get("id") or phone or b.get("session_path")
+        if is_bot_in_cooldown(key):
+            continue
+        if get_bot_daily_used(key) >= get_bot_daily_limit(b):
+            continue
+        out.append(b)
+    return out
+
+def list_workable_bots_by_ip(config=None):
+    return list_workable_bots(config)
+
 def is_bot_cooling(bot_key):
     import time
     data = load_cooldown()
@@ -560,27 +610,6 @@ def proxy_ip_key(proxy):
     host = s.split(":")[0].strip()
     return host or "direct"
 
-def list_workable_bots_by_ip(config=None):
-    """可工作水军按 IP 线路分组，选号时跨 IP 轮转，避免同一线路打爆"""
-    bots = list_workable_bots(config)
-    # 按 IP 分组
-    groups = {}
-    for b in bots:
-        ip = proxy_ip_key(b.get("proxy"))
-        groups.setdefault(ip, []).append(b)
-    # 跨组交错：ip1号1, ip2号1, ip3号1, ip1号2...
-    ordered = []
-    if not groups:
-        return ordered
-    keys = list(groups.keys())
-    max_len = max(len(v) for v in groups.values())
-    for i in range(max_len):
-        for k in keys:
-            if i < len(groups[k]):
-                ordered.append(groups[k][i])
-    return ordered
-
-
 
 def is_bot_selectable(b):
     st = str(b.get("status") or "").lower()
@@ -589,33 +618,6 @@ def is_bot_selectable(b):
     if not b.get("session_path"):
         return False
     return True
-
-def list_workable_bots(config=None):
-    """未冷却且未超每日上限的水军"""
-    if config is None:
-        config = load_config()
-    bots = config.get("bots") or []
-    out = []
-    for b in bots:
-        if not is_bot_selectable(b):
-            continue
-        key = b.get("id") or b.get("phone") or b.get("session_path")
-        cooling, left = is_bot_cooling(key)
-        if cooling:
-            b = dict(b)
-            b["_status"] = "cooldown"
-            b["_cooldown_left"] = left
-            continue
-        remain, used, limit = bot_daily_left(key)
-        if remain <= 0:
-            continue
-        bb = dict(b)
-        bb["_status"] = "work"
-        bb["_daily_used"] = used
-        bb["_daily_left"] = remain
-        bb["_daily_limit"] = limit
-        out.append(bb)
-    return out
 
 
 def require_auth(f):
@@ -1627,7 +1629,7 @@ def api_check_one():
                 try:
                     r = await client(ResolveUsernameRequest(username))
                 except UsernameNotOccupiedError:
-                    return {"username": username, "status": "unavailable", "collect": False, "premium": False, "reason": "not_found"}
+                    return {"username": username, "status": "error", "collect": False, "premium": False, "reason": "not_found"}
                 except UsernameInvalidError:
                     return {"username": username, "status": "invalid", "collect": False, "premium": False}
                 except FloodWaitError as e:
@@ -1636,7 +1638,7 @@ def api_check_one():
                 users = list(getattr(r, "users", None) or [])
                 chats = list(getattr(r, "chats", None) or [])
                 if not users:
-                    return {"username": username, "status": "unavailable", "collect": False, "premium": False, "reason": "no_user"}
+                    return {"username": username, "status": "channel", "collect": False, "premium": False, "reason": "no_user"}
                 user = users[0]
                 if getattr(user, "deleted", False):
                     return {"username": username, "status": "deleted", "collect": False, "premium": False}
@@ -2152,6 +2154,420 @@ def api_health():
     return jsonify({"status": "ok", "time": datetime.now().isoformat()})
 
 # ============ 启动 ============
+# ============ 线路组 / 健康检测 / 聊天资料（feiji 对齐） ============
+LINE_CAP = 10
+LINE_MAX = 5
+
+def _proxy_host(p):
+    p = str(p or "").strip()
+    return p.split(":")[0] if p else ""
+
+def _proxy_list_norm():
+    raw = []
+    try:
+        raw = load_proxy_pool()
+    except Exception:
+        raw = []
+    out = []
+    for x in raw:
+        if isinstance(x, dict):
+            s = (x.get("proxy") or x.get("url") or x.get("proxy_str") or "").strip()
+        else:
+            s = str(x).strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+def build_lines(config=None):
+    if config is None:
+        config = load_config()
+    proxies = _proxy_list_norm()
+    if not proxies:
+        proxies = [""]
+    buckets = {p: [] for p in proxies}
+    unassigned = []
+    for b in config.get("bots") or []:
+        px = str(b.get("proxy") or "").strip()
+        if px in buckets:
+            buckets[px].append(b)
+        else:
+            unassigned.append(b)
+    # 未绑定号填进未满线路
+    for b in unassigned:
+        placed = False
+        for p in proxies:
+            if p and len(buckets[p]) < LINE_CAP:
+                buckets[p].append(b)
+                b["proxy"] = p
+                placed = True
+                break
+        if not placed:
+            buckets[proxies[0]].append(b)
+    lines = []
+    for i, p in enumerate(proxies):
+        lines.append({
+            "id": "line_%s" % (i + 1),
+            "index": i + 1,
+            "proxy": p,
+            "host": _proxy_host(p),
+            "bots": [{
+                "id": x.get("id"),
+                "name": x.get("name"),
+                "phone": x.get("phone"),
+                "status": x.get("status"),
+                "health": x.get("health") or x.get("status") or "unknown",
+                "session_path": x.get("session_path"),
+                "api_id": x.get("api_id"),
+                "added_time": x.get("added_time"),
+            } for x in buckets[p][:LINE_CAP]]
+        })
+    return lines
+
+@app.route("/api/bots/lines", methods=["GET"])
+@require_auth
+def api_bots_lines():
+    config = load_config()
+    lines = build_lines(config)
+    save_config(config)
+    total = sum(len(x["bots"]) for x in lines)
+    return jsonify({"success": True, "lines": lines, "total_bots": total, "line_cap": LINE_CAP, "line_max": LINE_MAX})
+
+async def _probe_one(bot):
+    from telethon import TelegramClient
+    from telethon.tl.functions.contacts import ResolveUsernameRequest
+    from telethon.errors import FloodWaitError, UsernameNotOccupiedError
+    phone = bot.get("phone") or ""
+    sp = bot.get("session_path") or ""
+    if not sp:
+        return "no_session"
+    if not os.path.exists(sp) and not os.path.exists(sp + ".session"):
+        return "no_file"
+    try:
+        cli = TelegramClient(sp, int(bot.get("api_id") or 0), bot.get("api_hash") or "")
+        await cli.connect()
+        auth = await cli.is_user_authorized()
+        if not auth:
+            await cli.disconnect()
+            return "unauth"
+        try:
+            r = await cli(ResolveUsernameRequest("telegram"))
+            users = list(getattr(r, "users", None) or [])
+            await cli.disconnect()
+            return "ok" if users or True else "empty"
+        except FloodWaitError as e:
+            try:
+                await cli.disconnect()
+            except Exception:
+                pass
+            return "flood:%s" % e.seconds
+        except UsernameNotOccupiedError:
+            try:
+                await cli.disconnect()
+            except Exception:
+                pass
+            return "restricted"
+        except Exception as e:
+            try:
+                await cli.disconnect()
+            except Exception:
+                pass
+            name = type(e).__name__
+            if "AuthKeyUnregistered" in name:
+                return "unauth"
+            if "Flood" in name:
+                return "flood"
+            return name
+    except Exception as e:
+        return type(e).__name__
+
+@app.route("/api/bots/health", methods=["POST"])
+@require_auth
+def api_bots_health():
+    data = request.json or {}
+    line_id = (data.get("line_id") or "").strip()
+    config = load_config()
+    lines = build_lines(config)
+    targets = []
+    if line_id:
+        for L in lines:
+            if L["id"] == line_id:
+                targets = [b for b in (config.get("bots") or []) if b.get("id") in {x["id"] for x in L["bots"]}]
+                break
+    else:
+        targets = list(config.get("bots") or [])
+    rows = []
+    stat = {"ok": 0, "flood": 0, "restricted": 0, "unauth": 0, "other": 0}
+    for b in targets:
+        try:
+            h = run_async(_probe_one(b))
+        except Exception as e:
+            h = type(e).__name__
+        b["health"] = h
+        key = h.split(":")[0]
+        if key in stat:
+            stat[key] += 1
+        else:
+            stat["other"] += 1
+        rows.append({"id": b.get("id"), "phone": b.get("phone"), "health": h})
+    save_config(config)
+    stat["total"] = len(targets)
+    return jsonify({"success": True, "rows": rows, **stat})
+
+def _find_bot(config, bot_id):
+    for b in config.get("bots") or []:
+        if str(b.get("id")) == str(bot_id) or str(b.get("phone")) == str(bot_id):
+            return b
+    return None
+
+async def _open_client(bot):
+    from telethon import TelegramClient
+    sp = bot.get("session_path") or ""
+    cli = TelegramClient(sp, int(bot.get("api_id") or 0), bot.get("api_hash") or "")
+    await cli.connect()
+    if not await cli.is_user_authorized():
+        await cli.disconnect()
+        raise RuntimeError("session 未授权，请重新登录")
+    return cli
+
+@app.route("/api/bot/chat/dialogs", methods=["GET"])
+@require_auth
+def api_bot_dialogs():
+    bot_id = request.args.get("id") or ""
+    config = load_config()
+    bot = _find_bot(config, bot_id)
+    if not bot:
+        return jsonify({"error": "水军不存在"}), 404
+    async def _run():
+        cli = await _open_client(bot)
+        out = []
+        async for d in cli.iter_dialogs(limit=30):
+            out.append({
+                "id": d.id,
+                "name": d.name,
+                "unread": int(getattr(d, "unread_count", 0) or 0),
+                "is_group": bool(getattr(d, "is_group", False) or getattr(d, "is_channel", False)),
+            })
+        await cli.disconnect()
+        return out
+    try:
+        dialogs = run_async(_run())
+        return jsonify({"dialogs": dialogs})
+    except Exception as e:
+        return jsonify({"error": str(e), "dialogs": []}), 400
+
+@app.route("/api/bot/chat/messages", methods=["GET"])
+@require_auth
+def api_bot_messages():
+    bot_id = request.args.get("id") or ""
+    chat_id = request.args.get("chat_id") or ""
+    config = load_config()
+    bot = _find_bot(config, bot_id)
+    if not bot:
+        return jsonify({"error": "水军不存在"}), 404
+    async def _run():
+        cli = await _open_client(bot)
+        entity = await cli.get_entity(int(chat_id)) if str(chat_id).lstrip("-").isdigit() else await cli.get_entity(chat_id)
+        msgs = []
+        async for m in cli.iter_messages(entity, limit=40):
+            msgs.append({
+                "id": m.id,
+                "out": bool(m.out),
+                "text": m.text or "",
+                "date": str(m.date) if m.date else "",
+                "media_type": type(m.media).__name__ if m.media else "",
+            })
+        await cli.disconnect()
+        msgs.reverse()
+        return msgs
+    try:
+        return jsonify({"messages": run_async(_run())})
+    except Exception as e:
+        return jsonify({"error": str(e), "messages": []}), 400
+
+@app.route("/api/bot/chat/send", methods=["POST"])
+@require_auth
+def api_bot_chat_send():
+    data = request.json or {}
+    config = load_config()
+    bot = _find_bot(config, data.get("id"))
+    if not bot:
+        return jsonify({"error": "水军不存在"}), 404
+    chat_id = data.get("chat_id")
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "空消息"}), 400
+    async def _run():
+        cli = await _open_client(bot)
+        entity = await cli.get_entity(int(chat_id)) if str(chat_id).lstrip("-").isdigit() else await cli.get_entity(chat_id)
+        await cli.send_message(entity, text)
+        await cli.disconnect()
+        return True
+    try:
+        run_async(_run())
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/api/bot/chat/resolve", methods=["POST"])
+@require_auth
+def api_bot_chat_resolve():
+    data = request.json or {}
+    config = load_config()
+    bot = _find_bot(config, data.get("id"))
+    if not bot:
+        return jsonify({"error": "水军不存在"}), 404
+    username = (data.get("username") or "").strip().lstrip("@")
+    async def _run():
+        cli = await _open_client(bot)
+        ent = await cli.get_entity(username)
+        await cli.disconnect()
+        return getattr(ent, "id", None)
+    try:
+        pid = run_async(_run())
+        return jsonify({"peer_id": pid})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/api/bot/profile", methods=["POST"])
+@require_auth
+def api_bot_profile():
+    data = request.json or {}
+    config = load_config()
+    bot = _find_bot(config, data.get("id"))
+    if not bot:
+        return jsonify({"error": "水军不存在"}), 404
+    first_name = (data.get("first_name") or "").strip()
+    about = data.get("about")
+    async def _run():
+        from telethon.tl.functions.account import UpdateProfileRequest
+        cli = await _open_client(bot)
+        kwargs = {}
+        if first_name:
+            kwargs["first_name"] = first_name
+        if about is not None:
+            kwargs["about"] = about
+        if kwargs:
+            await cli(UpdateProfileRequest(**kwargs))
+        await cli.disconnect()
+        return True
+    try:
+        run_async(_run())
+        return jsonify({"success": True, "message": "资料已更新"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/bot/import_zip", methods=["POST"])
+@require_auth
+def api_bot_import_zip():
+    import io, zipfile
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "请上传 zip"}), 400
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(f.read()))
+    except Exception:
+        return jsonify({"error": "不是有效的 ZIP"}), 400
+    sessions, metas = {}, {}
+    for name in zf.namelist():
+        base = os.path.basename(name)
+        if not base or name.endswith("/"):
+            continue
+        stem = os.path.splitext(base)[0]
+        if base.endswith(".session"):
+            sessions[stem] = zf.read(name)
+        elif base.endswith(".json"):
+            try:
+                metas[stem] = json.loads(zf.read(name).decode("utf-8", "ignore"))
+            except Exception:
+                pass
+    if not sessions:
+        return jsonify({"error": "ZIP 里没有 .session"}), 400
+    config = load_config()
+    sess_dir = globals().get("SESSIONS_DIR") or "/root/bot_agent/sessions"
+    os.makedirs(sess_dir, exist_ok=True)
+    existing = {str(b.get("phone") or "").replace(" ", "") for b in (config.get("bots") or [])}
+    imported = skipped_dead = skipped_full = skipped_dup = 0
+    def _pick():
+        proxies = [p for p in _proxy_list_norm() if p]
+        counts = {p: 0 for p in proxies}
+        for b in config.get("bots") or []:
+            px = str(b.get("proxy") or "")
+            if px in counts:
+                counts[px] += 1
+        best, best_n = "", 10 ** 9
+        for p in proxies:
+            if counts[p] < LINE_CAP and counts[p] < best_n:
+                best, best_n = p, counts[p]
+        return best
+    for stem, raw in sessions.items():
+        meta = metas.get(stem) or metas.get(stem.lstrip("+")) or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        phone = str(meta.get("phone") or stem).strip().replace(" ", "")
+        if phone and not phone.startswith("+") and phone[:1].isdigit():
+            phone = "+" + phone
+        if phone in existing:
+            skipped_dup += 1
+            continue
+        api_id = meta.get("api_id") or meta.get("app_id")
+        api_hash = meta.get("api_hash") or meta.get("app_hash")
+        if not api_id or not api_hash:
+            try:
+                pool = load_api_pool()
+            except Exception:
+                pool = []
+            if pool:
+                api_id = pool[imported % len(pool)].get("api_id")
+                api_hash = pool[imported % len(pool)].get("api_hash")
+        if not api_id or not api_hash:
+            skipped_dead += 1
+            continue
+        proxy = _pick()
+        if not proxy:
+            skipped_full += 1
+            continue
+        safe = phone.replace("+", "")
+        sp = os.path.join(sess_dir, "session_" + safe)
+        with open(sp + ".session", "wb") as out:
+            out.write(raw)
+        async def _alive(_sp=sp, _id=int(api_id), _hash=str(api_hash)):
+            from telethon import TelegramClient
+            cli = TelegramClient(_sp, _id, _hash)
+            await cli.connect()
+            try:
+                return bool(await cli.is_user_authorized())
+            finally:
+                await cli.disconnect()
+        try:
+            alive = bool(run_async(_alive()))
+        except Exception as e:
+            alive = "Flood" in type(e).__name__
+        if not alive:
+            skipped_dead += 1
+            try:
+                os.remove(sp + ".session")
+            except Exception:
+                pass
+            continue
+        config.setdefault("bots", []).append({
+            "id": "soldier_zip_%s_%s" % (int(time.time()), safe),
+            "name": str(meta.get("first_name") or meta.get("username") or phone),
+            "phone": phone,
+            "api_id": str(api_id),
+            "api_hash": str(api_hash),
+            "session_path": sp,
+            "proxy": proxy,
+            "status": "ready",
+            "health": "ok",
+            "type": "userbot",
+            "added_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        existing.add(phone)
+        imported += 1
+    save_config(config)
+    return jsonify({"success": True, "imported": imported, "skipped_dead": skipped_dead, "skipped_full": skipped_full, "skipped_dup": skipped_dup})
+
 if __name__ == '__main__':
     ensure_loop_running()
     print(f"[{datetime.now()}] TG用户名检测工具 Agent 启动在端口 8899")
