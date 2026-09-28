@@ -935,6 +935,9 @@ def api_pool_add_batch():
         elif "," in line:
             a, b = line.split(",", 1)
             api_id, api_hash = a.strip(), b.strip()
+        elif ":" in line and line.split(":", 1)[0].strip().isdigit():
+            a, b = line.split(":", 1)
+            api_id, api_hash = a.strip(), b.strip()
         elif "\t" in line:
             a, b = line.split("\t", 1)
             api_id, api_hash = a.strip(), b.strip()
@@ -2058,47 +2061,6 @@ def api_stats():
     })
 
 # ============ 健康检查 ============
-
-@app.route('/api/pool/api/batch', methods=['POST'])
-@require_auth
-def api_pool_api_batch():
-    """批量添加 API，不限制条数。支持 text 或 lines，格式 api_id-api_hash / api_id:api_hash"""
-    data = request.json or {}
-    text = data.get('text') or ''
-    lines = data.get('lines') or []
-    if text and not lines:
-        lines = str(text).splitlines()
-    pool = load_api_pool()
-    existing = {str(x.get('api_id')) for x in pool}
-    added = 0
-    for line in lines:
-        line = str(line).strip()
-        if not line:
-            continue
-        api_id, api_hash = None, None
-        if '-' in line:
-            a, b = line.split('-', 1)
-            api_id, api_hash = a.strip(), b.strip()
-        elif ':' in line:
-            a, b = line.split(':', 1)
-            api_id, api_hash = a.strip(), b.strip()
-        elif ' ' in line:
-            parts = line.split()
-            if len(parts) >= 2:
-                api_id, api_hash = parts[0].strip(), parts[1].strip()
-        if not api_id or not api_hash:
-            continue
-        if str(api_id) in existing:
-            continue
-        try:
-            api_id_i = int(api_id)
-        except Exception:
-            continue
-        pool.append({"api_id": api_id_i, "api_hash": api_hash, "label": f"API-{api_id_i}"})
-        existing.add(str(api_id_i))
-        added += 1
-    save_api_pool(pool)
-    return jsonify({"success": True, "added": added, "total": len(pool)})
 
 @app.route('/api/pool/proxy/batch', methods=['POST'])
 @require_auth

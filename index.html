@@ -1447,22 +1447,7 @@
             showToast('已清空导入队列和检测结果');
         }
 
-        function exportBatchPremium() {
-            const list = getBatchPremium();
-            if (!list.length) { showToast('本轮没有会员'); return; }
-            const text = list.map(r => '@' + String(r.username||'').replace(/^@/,'')).join('\n');
-            downloadTextFile(text, '本轮会员_' + list.length + '.txt');
-            showToast('已导出本轮会员 ' + list.length + ' 条');
-        }
-        async function savePremiumFromCheck() {
-            const premiumHits = getBatchPremium();
-            if (!premiumHits.length) { showToast('当前结果中没有会员'); return; }
-            try {
-                const data = await apiCall('/api/premium/result', 'POST', { premium: premiumHits });
-                showToast('已写入会员文档 ' + (data.added??premiumHits.length) + ' 条，累计 ' + (data.total||'') + ' 条');
-            } catch (err) { showToast('写入失败: ' + err.message); }
-        }
-        async function saveTargetsFromCheck() {
+                        async function saveTargetsFromCheck() {
             const hits = getBatchClean();
             if (!hits.length) { showToast('当前结果中没有可用用户'); return; }
             try {
@@ -1490,17 +1475,7 @@
             showToast('已导出 ' + data.length + ' 条' + (type === 'available' ? '（仅可用）' : type === 'premium' ? '（仅会员）' : ''));
         }
 
-        async function savePremiumFromCheck() {
-            const premiumHits = checkResults.filter(r => !!r.premium);
-            if (!premiumHits.length) { showToast('当前结果中没有会员'); return; }
-            try {
-                const data = await apiCall('/api/premium/result', 'POST', { premium: premiumHits });
-                showToast('已写入会员文档 ' + (data.added != null ? data.added : premiumHits.length) + ' 条，文档共 ' + (data.total || '') + ' 条');
-            } catch (err) {
-                showToast('写入失败: ' + err.message);
-            }
-        }
-
+        
         async function restoreData() {
             try {
                 showToast('正在恢复数据...');
