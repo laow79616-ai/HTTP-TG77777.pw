@@ -263,7 +263,7 @@
             <div class="logo">
                 <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
             </div>
-            <h1>TG Username Scanner</h1>
+            <h1>检测一号机</h1>
             <p class="subtitle">批量检测 · 水军管理 · 关键词筛选 · 一键导出</p>
         </div>
 
@@ -1864,12 +1864,24 @@
             setTimeout(() => t.classList.remove('show'), 3000);
         }
 
+        function exportJob(type) {
+            var list = (window.checkResults && window.checkResults.length) ? window.checkResults : ((typeof checkResults !== "undefined" && checkResults) ? checkResults : []);
+            var rows;
+            if (type === "clean" || type === "available") rows = list.filter(function (r) { return r && (r.status === "clean" || r.collect === true); });
+            else if (type === "premium") rows = list.filter(function (r) { return r && !!r.premium; });
+            else rows = list.filter(function (r) { return r && r.username; });
+            if (!rows.length) { showToast("没有可导出的数据"); return; }
+            var content = rows.map(function (r) { return "@" + String(r.username || "").replace(/^@/, ""); }).join("\n");
+            var name = (type === "clean" || type === "available") ? "可用.txt" : (type === "premium" ? "会员.txt" : "全部.txt");
+            downloadFile(content, name);
+            showToast("已开始下载 " + rows.length + " 条");
+        }
         function downloadFile(content, filename) {
             const type = filename.endsWith('.csv') ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8';
             const blob = new Blob([content], { type });
             const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob); a.download = filename; a.click();
-            URL.revokeObjectURL(a.href);
+            a.href = URL.createObjectURL(blob); a.download = filename; document.body.appendChild(a); a.click();
+            setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 2000);
         }
 
         // Init
