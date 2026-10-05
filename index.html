@@ -406,7 +406,7 @@
                     <div style="font-size:12px;opacity:.75;margin-top:2px;">今日检测</div>
                 </div>
             </div>
-            <div id="botWorkStatus" style="font-size:12px;opacity:.8;margin:-4px 0 12px;">每批≤300 · 每号每日≤500</div>
+            <div id="botWorkStatus" style="font-size:12px;opacity:.8;margin:-4px 0 12px;">每批≤300 · 每号每日≤500 · 工作中=代理线在线，冷却只计水军号</div>
 
                 <div class="file-upload" id="fileUpload">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -414,7 +414,7 @@
                     </svg>
                     <p>点击上传或拖拽文件到此处</p>
                     <p class="hint">支持 .txt 文件，每行一个用户名</p>
-                    <input type="file" id="fileInput" accept=".txt" style="display:none">
+                    <input type="file" id="fileInput" accept=".txt,text/plain" multiple style="display:none">
                 </div>
                 <div class="form-group">
                     <label>手动输入用户名（每行一个，不需要@符号）</label>
@@ -423,6 +423,8 @@
                     <button class="btn btn-secondary" type="button" onclick="saveCheckPool()">保存到检测池</button>
                     <button class="btn btn-secondary" type="button" onclick="loadCheckPool()">载入检测池</button>
                     <button class="btn btn-danger" type="button" onclick="clearCheckPoolAll()">一键全选删除用户名</button>
+                    <button class="btn btn-primary" type="button" onclick="document.getElementById('txtBatchInput').click()">批量导入TXT</button>
+                    <input type="file" id="txtBatchInput" accept=".txt,text/plain" multiple style="display:none" onchange="importTxtFiles(this.files); this.value='';">
                     <span id="checkPoolHint" style="font-size:12px;color:var(--text-secondary);align-self:center"></span>
                 </div>
 
@@ -431,7 +433,7 @@
                 <div class="form-row">
                     <div class="form-group">
                         <label>检测间隔（毫秒）</label>
-                        <input type="text" id="delayInput" value="3000">
+                        <input type="text" id="delayInput" value="7000">
                     </div>
                     <div class="form-group">
                         <label>并发数量</label>
@@ -444,7 +446,7 @@
                     </div>
                 </div>
                 <div style="display:flex;gap:12px;flex-wrap:wrap">
-                    <button class="btn btn-primary" id="startCheckBtn" onclick="window._checkImportTotal=countInputNames();updateCheckStats();startCheckQueued()">开始检测</button>
+                    <button class="btn btn-primary" id="startCheckBtn" onclick="startCheckNow()">开始检测</button>
                     <button class="btn btn-danger hidden" id="stopCheckBtn" onclick="stopCheck()">停止</button>
                     <button class="btn btn-secondary" onclick="clearCheck()">清空</button>
                     <button class="btn btn-success" onclick="exportJob('all')">导出全部</button>
@@ -1118,10 +1120,41 @@
             fileUpload.addEventListener('click', () => fileInput.click());
             fileUpload.addEventListener('dragover', e => { e.preventDefault(); fileUpload.style.borderColor = 'var(--primary)'; });
             fileUpload.addEventListener('dragleave', () => { fileUpload.style.borderColor = 'var(--border)'; });
-            fileUpload.addEventListener('drop', e => { e.preventDefault(); fileUpload.style.borderColor = 'var(--border)'; if(e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
-            fileInput.addEventListener('change', e => { if(e.target.files[0]) handleFile(e.target.files[0]); });
+            fileUpload.addEventListener('drop', e => { e.preventDefault(); fileUpload.style.borderColor = 'var(--border)'; if(e.dataTransfer.files && e.dataTransfer.files.length) importTxtFiles(e.dataTransfer.files); });
+            fileInput.addEventListener('change', e => { if(e.target.files && e.target.files.length) importTxtFiles(e.target.files); e.target.value=''; });
             renderBlacklistTags();
         });
+
+        
+        function importTxtFiles(files) {
+            var list = Array.prototype.slice.call(files || []);
+            if (!list.length) return;
+            var box = document.getElementById('usernameInput');
+            var chunks = [box ? String(box.value || '') : ''];
+            var pending = list.length;
+            list.forEach(function(file){
+                var reader = new FileReader();
+                reader.onload = function(e) {
+                    chunks.push(String(e.target.result || ''));
+                    pending -= 1;
+                    if (pending > 0) return;
+                    var seen = {}, out = [];
+                    chunks.join('\n').split(/\r?\n/).forEach(function(line){
+                        var u = String(line || '').trim().replace(/^@/, '');
+                        if (!u) return;
+                        var k = u.toLowerCase();
+                        if (seen[k]) return;
+                        seen[k] = 1;
+                        out.push(u);
+                    });
+                    if (box) box.value = out.join('\n');
+                    try { window._checkImportTotal = (typeof countInputNames==='function') ? countInputNames() : out.length; updateCheckStats(); } catch (err) {}
+                    showToast('已导入 ' + list.length + ' 个TXT，共 ' + out.length + ' 个用户名');
+                };
+                reader.onerror = function(){ pending -= 1; showToast('读取失败: ' + file.name); };
+                reader.readAsText(file);
+            });
+        }
 
         function handleFile(file) {
             const reader = new FileReader();
@@ -1253,6 +1286,7 @@
 
         
         function statusLabel(status, premium) {
+            if (status === 'inactive') return { text: '超30天', color: '#90a4ae' };
             if (premium || status === 'premium') return { text: '会员', color: '#ffc107' };
             var map = {
                 pending: { text: '等待', color: '#64748b' },
@@ -1357,7 +1391,7 @@
 
         
         async function startCheckQueued() {
-            if (window.isChecking) return;
+            if (window._jobPolling) { showToast('后台正在检测，不用重复开始'); return; }
             var box = document.getElementById('usernameInput');
             var raw = box ? box.value : '';
             var names = [];
@@ -1374,26 +1408,120 @@
             window.shouldStop = false;
             window.isChecking = true;
             window._checkImportTotal = names.length;
+            window._jobCursor = 0;
             window.checkResults = names.map(function(u) {
                 return { username: u, status: 'pending', premium: false, collect: false };
             });
-            try { updateCheckStats(); } catch (e) {}
-            try { renderCheckResults(); } catch (e) {}
             var startBtn = document.getElementById('startCheckBtn');
             var stopBtn = document.getElementById('stopCheckBtn');
             if (startBtn) startBtn.classList.add('hidden');
             if (stopBtn) stopBtn.classList.remove('hidden');
+            try { updateCheckStats(); } catch (e) {}
             var delay = parseInt((document.getElementById('delayInput') || {}).value, 10) || 3000;
+            try {
+                var started = await apiCall('/api/check/job/start', 'POST', { usernames: names, delay: delay });
+                if (started && started.success === false) { showToast(started.error || '启动失败'); throw new Error(started.error || 'start'); }
+            } catch (e) {
+                window.isChecking = false;
+                if (startBtn) startBtn.classList.remove('hidden');
+                if (stopBtn) stopBtn.classList.add('hidden');
+                showToast('后台启动失败: ' + (e && e.message ? e.message : e));
+                return;
+            }
+            showToast('已交给后台检测。刷新或断网也会继续，直到手动停止或全部查完');
+            pollServerJob();
+        }
+        async function pollServerJob() {
+            window._jobPolling = true;
+            window.isChecking = true;
+            var startBtn = document.getElementById('startCheckBtn');
+            var stopBtn = document.getElementById('stopCheckBtn');
+            if (startBtn) startBtn.classList.add('hidden');
+            if (stopBtn) stopBtn.classList.remove('hidden');
+            try {
+                var d = await apiCall('/api/check/job/status?from=' + (window._jobCursor || 0) + '&limit=300');
+                var rows = (d && d.results) || [];
+                if (!window.checkResults) window.checkResults = [];
+                for (var i = 0; i < rows.length; i++) {
+                    var r = normalizeCheckRow(rows[i], rows[i].username);
+                    var idx = (window._jobCursor || 0) + i;
+                    if (window.checkResults[idx]) window.checkResults[idx] = Object.assign(window.checkResults[idx], r);
+                    else window.checkResults.push(r);
+                }
+                window._jobCursor = (window._jobCursor || 0) + rows.length;
+                if (d && d.total) window._checkImportTotal = d.total;
+                try { updateCheckStats(); } catch (e) {}
+                var now = Date.now();
+                if (!window._lastRender || now - window._lastRender > 2000) {
+                    window._lastRender = now;
+                    try { renderCheckResults(); } catch (e) {}
+                }
+                if (d && d.running) {
+                    setTimeout(pollServerJob, 1200);
+                    return;
+                }
+                try { renderCheckResults(); updateCheckStats(); } catch (e) {}
+                window.isChecking = false;
+                window._jobPolling = false;
+                if (startBtn) startBtn.classList.remove('hidden');
+                if (stopBtn) stopBtn.classList.add('hidden');
+                showToast((d && d.message) || '检测完成');
+            } catch (e) {
+                window.isChecking = true;
+                setTimeout(pollServerJob, 3000);
+            }
+        }
+        async function resumeServerJob() {
+            try {
+                var d = await apiCall('/api/check/job/status?from=0&limit=1&full=1');
+                if (!d || !d.running) return;
+                var order = d.order || [];
+                window._checkImportTotal = d.total || order.length;
+                window.checkResults = order.map(function(u) { return { username: u, status: 'pending', premium: false, collect: false }; });
+                var box = document.getElementById('usernameInput');
+                if (box && order.length) box.value = order.map(function(u) { return '@' + String(u).replace(/^@/, ''); }).join('\n');
+                window._jobCursor = 0;
+                window.shouldStop = false;
+                showToast('后台仍在检测，已接上，不用重新开始');
+                pollServerJob();
+            } catch (e) {}
+        }
+        setTimeout(resumeServerJob, 800);
+        
+        async function startCheckNow() {
+            if (window._localRunning) { showToast('正在检测'); return; }
+            var box = document.getElementById('usernameInput');
+            var names = [], seen = {};
+            String(box ? box.value : '').split(/\r?\n/).forEach(function(u){
+                u = String(u||'').trim().replace(/^@/,'');
+                if (!u) return;
+                var k = u.toLowerCase();
+                if (seen[k]) return;
+                seen[k] = 1;
+                names.push(u);
+            });
+            if (!names.length) { showToast('请输入用户名'); return; }
+            window.shouldStop = false;
+            window.isChecking = true;
+            window._localRunning = true;
+            window._checkImportTotal = names.length;
+            window.checkResults = names.map(function(u){ return {username:u, status:'pending', premium:false, collect:false}; });
+            try { checkResults = window.checkResults; } catch (e) {}
+            var startBtn = document.getElementById('startCheckBtn');
+            var stopBtn = document.getElementById('stopCheckBtn');
+            if (startBtn) startBtn.classList.add('hidden');
+            if (stopBtn) stopBtn.classList.remove('hidden');
+            showToast('开始检测，共 ' + names.length + ' 个');
+            var delay = parseInt((document.getElementById('delayInput')||{}).value, 10) || 3000;
             for (var i = 0; i < names.length; i++) {
                 if (window.shouldStop) break;
                 window.checkResults[i].status = 'checking';
                 try { updateCheckStats(); renderCheckResults(); } catch (e) {}
                 try {
-                    if (typeof checkUsername === 'function') {
-                        await checkUsername(names[i], i);
-                    } else {
-                        var data = await apiCall('/api/check/one', 'POST', { username: names[i] });
-                        window.checkResults[i] = Object.assign(window.checkResults[i], data || {});
+                    if (typeof checkUsername === 'function') await checkUsername(names[i], i);
+                    else {
+                        var data = await apiCall('/api/check/one', 'POST', {username: names[i]});
+                        window.checkResults[i] = Object.assign({username: names[i]}, data || {});
                     }
                 } catch (err) {
                     window.checkResults[i].status = 'error';
@@ -1401,9 +1529,10 @@
                 }
                 try { updateCheckStats(); renderCheckResults(); } catch (e) {}
                 if (i + 1 < names.length && !window.shouldStop) {
-                    await new Promise(function(ok) { setTimeout(ok, delay); });
+                    await new Promise(function(ok){ setTimeout(ok, delay); });
                 }
             }
+            window._localRunning = false;
             window.isChecking = false;
             if (startBtn) startBtn.classList.remove('hidden');
             if (stopBtn) stopBtn.classList.add('hidden');
@@ -1411,26 +1540,18 @@
             showToast(window.shouldStop ? '已停止' : '检测完成');
         }
 
-
-        
         function stopCheck() {
             window.shouldStop = true;
-            window.isChecking = false;
             if (typeof shouldStop !== 'undefined') shouldStop = true;
-            if (typeof isChecking !== 'undefined') isChecking = false;
-            window.usernameQueue = [];
-            if (typeof usernameQueue !== 'undefined') usernameQueue = [];
-            var startBtn = document.getElementById('startCheckBtn');
-            var stopBtn = document.getElementById('stopCheckBtn');
-            if (startBtn) startBtn.classList.remove('hidden');
-            if (stopBtn) stopBtn.classList.add('hidden');
-            showToast('已停止，等待当前这一条返回后不再继续');
-            try { updateCheckStats(); } catch (e) {}
+            apiCall('/api/check/job/stop', 'POST', {}).catch(function(){});
+            showToast('已发送停止。当前这一条返回后，后台就停');
         }
 
 
+        
         async function clearCheck() {
             shouldStop = true;
+            try { apiCall('/api/check/job/stop', 'POST', {}); } catch (e) {}
             isChecking = false;
             usernameQueue = [];
             checkResults = [];
@@ -2236,5 +2357,92 @@ async function uploadSessionZip(){
 
 </script>
 
+
+<script>
+(function(){
+  var KEY = 'tg_check_input_v1';
+  function box(){ return document.getElementById('usernameInput'); }
+  function restore(){
+    var b = box();
+    if (!b) return;
+    var saved = localStorage.getItem(KEY) || '';
+    if (saved && !String(b.value||'').trim()) b.value = saved;
+    try {
+      window._checkImportTotal = (typeof countInputNames==='function') ? countInputNames() : 0;
+      if (typeof updateCheckStats==='function') updateCheckStats();
+    } catch (e) {}
+  }
+  function save(){
+    var b = box();
+    if (!b) return;
+    try { localStorage.setItem(KEY, b.value || ''); } catch (e) {}
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', restore);
+  else restore();
+  document.addEventListener('input', function(e){
+    if (e.target && e.target.id === 'usernameInput') save();
+  });
+  setInterval(save, 1500);
+  window.addEventListener('beforeunload', save);
+})();
+</script>
+
+<script id="lineCards">
+(function(){
+  function paint(sum){
+    if (!sum) return;
+    var want = {"工作中": sum.work, "冷却中": sum.cooldown};
+    var all = document.querySelectorAll("div,span");
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (el.children.length) continue;
+      var t = (el.textContent || "").trim();
+      if (!Object.prototype.hasOwnProperty.call(want, t)) continue;
+      var prev = el.previousElementSibling;
+      if (prev) prev.textContent = want[t];
+    }
+  }
+  function tick(){
+    var key = localStorage.getItem("tg_auth_key") || "";
+    fetch("/api/bots/work_status", {headers: {"Authorization": "Bearer " + key}})
+      .then(function(r){ return r.json(); })
+      .then(function(d){ paint(d.summary || {}); })
+      .catch(function(){});
+  }
+  setInterval(tick, 2000);
+  setTimeout(tick, 600);
+})();
+</script>
+
+<script id="keepDraft">
+(function(){
+  var KEY = "tg_check_draft_v1";
+  function box(){
+    return document.getElementById("usernameInput") || document.querySelector("textarea");
+  }
+  function demo(v){
+    var t = (v || "").replace(/\r/g, "").trim();
+    return !t || t === "username1\nusername2\nusername3";
+  }
+  function save(){
+    var el = box();
+    if (!el || demo(el.value)) return;
+    localStorage.setItem(KEY, el.value);
+  }
+  function load(){
+    var el = box();
+    if (!el) return;
+    var saved = localStorage.getItem(KEY);
+    if (saved && demo(el.value)) {
+      el.value = saved;
+      try { el.dispatchEvent(new Event("input", {bubbles:true})); } catch(e) {}
+    }
+  }
+  setInterval(save, 1500);
+  document.addEventListener("change", save, true);
+  document.addEventListener("drop", function(){ setTimeout(save, 400); }, true);
+  setTimeout(load, 400);
+})();
+</script>
 </body>
 </html>
