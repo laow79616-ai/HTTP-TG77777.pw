@@ -1286,6 +1286,8 @@
 
         
         function statusLabel(status, premium) {
+            if (status === 'flood') return { text: '限流', color: '#ff9800' };
+            if (status === 'skip') return { text: '已跳过', color: '#666' };
             if (status === 'inactive') return { text: '超30天', color: '#90a4ae' };
             if (premium || status === 'premium') return { text: '会员', color: '#ffc107' };
             var map = {
@@ -1347,11 +1349,13 @@
         }
 
         function renderCheckResults() {
+            var viewRows = checkResults.filter(function(r){ return !r || r.status !== 'skip'; });
+
             var box = document.getElementById('checkResultsList');
             if (!box) return;
-            var list = (window.checkResults && window.checkResults.length)
-                ? window.checkResults
-                : ((typeof checkResults !== 'undefined' && checkResults) ? checkResults : []);
+            var list = (window.viewRows && window.viewRows.length)
+                ? window.viewRows
+                : ((typeof viewRows !== 'undefined' && viewRows) ? viewRows : []);
             if (!list.length) { box.innerHTML = ''; return; }
             box.innerHTML = list.map(function(r) {
                 var s = statusLabel(r.status, r.premium);
@@ -1374,6 +1378,25 @@
             updateCheckStats();
             try {
                 var data = await apiCall('/api/check/one', 'POST', { username: username });
+                
+                if (data && data.status === 'flood' && !data.drop) {
+                    checkResults[index].status = 'flood';
+                    checkResults[index].error = data.reason || '限流';
+                    checkResults[index].collect = false;
+                    try { updateCheckStats(); } catch (e) {}
+                    try { renderCheckResults(typeof currentFilter === 'string' ? currentFilter : 'all'); } catch (e) {}
+                    return;
+                }
+
+                if (data && (data.drop || data.status === 'skip')) {
+                    checkResults[index].status = 'skip';
+                    checkResults[index].error = '';
+                    checkResults[index].collect = false;
+                    try { updateCheckStats(); } catch (e) {}
+                    try { renderCheckResults(typeof currentFilter === 'string' ? currentFilter : 'all'); } catch (e) {}
+                    return;
+                }
+
                 var row = normalizeCheckRow(data, username);
                 checkResults[index] = row;
                 if (row.premium) {

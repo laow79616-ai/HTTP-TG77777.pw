@@ -377,6 +377,9 @@ AD_KEYWORDS = [
 
 
 def is_ad_account(username, first_name="", last_name=""):
+    _nm = (str(username or '') + ' ' + str(first_name or '') + ' ' + str(last_name or '')).lower()
+    if any(k.lower() in _nm for k in ("bot", "集团", "主", "全国", "全球", "会所")):
+        return True
     text = " ".join([
         str(username or ""),
         str(first_name or ""),
@@ -413,19 +416,20 @@ def _letters_no_rhythm(s):
     return vowels / len(s) < 0.25
 
 def _is_shuijun_name(username):
-    u = re.sub(r"[^A-Za-z0-9]", "", (username or "").lstrip("@"))
-    if re.fullmatch(r"\d{5}", u):
+    """水军必须同时满足：字母没规律，且至少4位、彼此不重复的数字。"""
+    import re
+    raw = re.sub(r"[^A-Za-z0-9]", "", username or "")
+    if len(raw) < 6:
         return False
-    letters = "".join(re.findall(r"[A-Za-z]+", u))
-    digits = "".join(re.findall(r"\d", u))
-    if len(letters) < 5 or len(digits) < 4:
+    digits = re.sub(r"[^0-9]", "", raw)
+    if len(digits) < 4 or len(set(digits)) != len(digits):
         return False
-    if not _letters_no_rhythm(letters):
+    letters = re.sub(r"[^A-Za-z]", "", raw).lower()
+    if len(letters) < 4:
         return False
-    if len(digits) != len(set(digits)):
-        return False
-    return True
-
+    no_vowel = re.search(r"[aeiou]", letters) is None
+    no_rhythm = re.search(r"[bcdfghjklmnpqrstvwxyz]{5,}", letters) is not None
+    return no_vowel or no_rhythm
 def _active_within_30(status):
     if status is None:
         return True
@@ -466,50 +470,81 @@ def _within_from_out(out):
             return True
     return True
 
-def _apply_judgement(out):
-    if not isinstance(out, dict):
-        return out
-    if isinstance(out.get("results"), list):
-        out["results"] = [_apply_judgement(x) if isinstance(x, dict) else x for x in out["results"]]
-    if "username" not in out:
-        return out
-    err = str(out.get("error") or "")
-    if "Flood" in err or out.get("status") in ("flood",):
-        return out
-    if out.get("entity_type") in ("Channel", "Chat"):
-        out["collect"] = False
-        return out
-    if out.get("status") == "deleted":
-        out["collect"] = False
-        return out
-    u = str(out.get("username") or "")
-    if out.get("is_bot") or _is_shuijun_name(u):
-        out["status"] = "spam"
-        out["is_spam"] = True
-        out["collect"] = False
-        return out
-    if out.get("status") == "ad" or (out.get("is_ad") and not out.get("premium")):
-        out["status"] = "ad"
-        out["collect"] = False
-        return out
-    resolved = bool(out.get("user_id") or out.get("first_name") or out.get("status") in ("clean", "taken", "inactive", "ad", "spam"))
-    if not resolved:
-        return out
-    if not _within_from_out(out):
-        out["status"] = "inactive"
-        out["is_spam"] = False
-        out["collect"] = False
-        return out
-    out["status"] = "clean"
-    out["is_spam"] = False
-    out["collect"] = True
-    if err and "Flood" not in err:
-        out.pop("error", None)
-    return out
+def _online_within_days(info, days=30):
+    """30天内在线才算活跃。recently、上周、本月、具体时间都认。"""
+    from datetime import datetime, timezone, timedelta
+    if not isinstance(info, dict):
+        return False
+    if info.get("online_recent") is True or info.get("recent") is True:
+        return True
+    parts = []
+    for k in ("online", "status_name", "last_seen", "user_status", "st_name"):
+        v = info.get(k)
+        if v:
+            parts.append(str(v))
+    blob = " ".join(parts)
+    if any(x in blob for x in ("UserStatusOnline", "UserStatusRecently", "UserStatusLastWeek", "UserStatusLastMonth")):
+        return True
+    candidates = []
+    for k in ("was_online", "last_seen_ts", "last_online"):
+        if info.get(k) not in (None, ""):
+            candidates.append(info.get(k))
+    now = datetime.now(timezone.utc)
+    for v in candidates:
+        dt = None
+        try:
+            if isinstance(v, (int, float)) and v > 10 ** 9:
+                dt = datetime.fromtimestamp(v, tz=timezone.utc)
+            elif isinstance(v, str) and v.isdigit():
+                dt = datetime.fromtimestamp(int(v), tz=timezone.utc)
+            elif isinstance(v, str):
+                dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+            elif hasattr(v, "timestamp"):
+                dt = v if getattr(v, "tzinfo", None) else v.replace(tzinfo=timezone.utc)
+        except Exception:
+            dt = None
+        if dt is not None:
+            if getattr(dt, "tzinfo", None) is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if now - dt <= timedelta(days=days):
+                return True
+    return False
 
+def _apply_judgement(obj):
+    """30天内在线的真人优先可用，用户名奇怪也不能盖过在线。"""
+    if not isinstance(obj, dict) or not obj.get("username"):
+        return obj
+    if obj.get("status") in ("error", "flood", "retry", "invalid", "deleted", "unavailable", "available"):
+        return obj
+    username = str(obj.get("username") or "").lstrip("@")
+    fn = obj.get("first_name") or ""
+    ln = obj.get("last_name") or ""
+    is_premium = bool(obj.get("premium"))
+    is_bot = bool(obj.get("is_bot") or obj.get("bot"))
+    try:
+        ad = bool(is_ad_account(username, fn, ln) or obj.get("is_ad"))
+    except Exception:
+        ad = bool(obj.get("is_ad"))
+    online_recent = _online_within_days(obj, 30)
+    if ad:
+        st = "ad"
+    elif is_bot:
+        st = "spam"
+    elif online_recent:
+        st = "clean"
+    elif _is_shuijun_name(username):
+        st = "spam"
+    else:
+        st = "inactive"
+    obj["status"] = st
+    obj["premium"] = is_premium
+    obj["is_ad"] = st == "ad"
+    obj["is_spam"] = st == "spam"
+    obj["online_recent"] = online_recent
+    obj["collect"] = st == "clean" or is_premium
+    return obj
 def is_bot_like_username(username):
     return _is_shuijun_name(username)
-
 def classify_last_online(status_obj):
     from datetime import datetime, timezone, timedelta
     if status_obj is None:
@@ -1372,6 +1407,87 @@ def proxy_pool_redistribute():
 
 # ============ 批量检测接口（真实 Telegram 查询） ============
 
+
+async def _find_user_by_search(client, username):
+    from telethon.tl.functions.contacts import SearchRequest
+    sres = await client(SearchRequest(q=username, limit=10))
+    want = (username or "").lower()
+    for u in (getattr(sres, "users", None) or []):
+        if str(getattr(u, "username", "") or "").lower() == want:
+            return u
+    return None
+
+def _pack_found_user(username, user):
+    if getattr(user, "deleted", False):
+        return {"username": username, "status": "deleted", "premium": False, "collect": False, "reason": "deleted"}
+    st = getattr(user, "status", None)
+    online = type(st).__name__ if st is not None else ""
+    was = getattr(st, "was_online", None) if st is not None else None
+    was_s = ""
+    try:
+        if hasattr(was, "isoformat"):
+            was_s = was.isoformat()
+    except Exception:
+        was_s = ""
+    fn = getattr(user, "first_name", "") or ""
+    ln = getattr(user, "last_name", "") or ""
+    premium = bool(getattr(user, "premium", False))
+    is_bot = bool(getattr(user, "bot", False))
+    obj = {
+        "username": username,
+        "status": "taken",
+        "premium": premium,
+        "is_bot": is_bot,
+        "first_name": fn,
+        "last_name": ln,
+        "online": online,
+        "was_online": was_s,
+        "user_id": getattr(user, "id", None),
+    }
+    if "_apply_judgement" in globals():
+        try:
+            obj = _apply_judgement(obj)
+        except Exception:
+            pass
+    if obj.get("status") in ("unavailable", "retry", "error", "taken", None, ""):
+        ad = False
+        spam = is_bot
+        if "is_ad_account" in globals():
+            try:
+                ad = bool(is_ad_account(username, fn, ln))
+            except Exception:
+                ad = False
+        if "is_bot_like_username" in globals():
+            try:
+                spam = spam or bool(is_bot_like_username(username))
+            except Exception:
+                pass
+        recent = online in ("UserStatusOnline", "UserStatusRecently", "UserStatusLastWeek", "UserStatusLastMonth")
+        if not recent and was_s:
+            try:
+                from datetime import datetime, timezone
+                dt = datetime.fromisoformat(was_s.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                recent = (datetime.now(timezone.utc) - dt).days <= 30
+            except Exception:
+                recent = False
+        if ad:
+            obj["status"] = "ad"
+            obj["collect"] = False
+        elif spam:
+            obj["status"] = "spam"
+            obj["collect"] = False
+        elif recent or premium:
+            obj["status"] = "clean"
+            obj["collect"] = True
+        else:
+            obj["status"] = "inactive"
+            obj["collect"] = False
+    if obj.get("status") == "clean" or (obj.get("premium") and obj.get("status") not in ("ad", "spam", "deleted")):
+        obj["collect"] = True
+    return obj
+
 async def async_check_one_username(client, username):
     """真实检测单个用户名：available / taken / deleted / invalid / error"""
     from telethon.tl.functions.contacts import ResolveUsernameRequest
@@ -1384,6 +1500,15 @@ async def async_check_one_username(client, username):
             if getattr(user, 'deleted', False):
                 return {"username": username, "status": "deleted", "premium": False}
             is_premium = bool(getattr(user, 'premium', False))
+            _st = getattr(user, 'status', None)
+            _st_name = type(_st).__name__ if _st is not None else ''
+            _was = getattr(_st, 'was_online', None)
+            try:
+                _was_s = _was.isoformat() if hasattr(_was, 'isoformat') else ''
+            except Exception:
+                _was_s = ''
+            _recent = _online_within_days({'online': _st_name, 'was_online': _was, 'last_seen': _was_s}, 30)
+            online_recent = _recent
             fn = getattr(user, 'first_name', '') or ''
             ln = getattr(user, 'last_name', '') or ''
             ad = is_ad_account(username, fn, ln)
@@ -1401,7 +1526,15 @@ async def async_check_one_username(client, username):
             return {"username": username, "status": "taken", "premium": False}
         return {"username": username, "status": "taken", "premium": False}
     except UsernameNotOccupiedError:
-        return {"username": username, "status": "unavailable", "premium": False, "collect": False, "reason": "not_found"}
+        try:
+            _su = await _find_user_by_search(client, username)
+        except Exception as _e:
+            if type(_e).__name__ == 'FloodWaitError':
+                raise
+            _su = None
+        if _su is not None:
+            return _pack_found_user(username, _su)
+        return {"username": username, "status": "retry", "premium": False, "collect": False, "reason": "resolve_empty"}
     except UsernameInvalidError:
         return {"username": username, "status": "invalid", "premium": False}
     except FloodWaitError as e:
@@ -1409,7 +1542,15 @@ async def async_check_one_username(client, username):
     except Exception as e:
         err = str(e)
         if "No user has" in err or "USERNAME_NOT_OCCUPIED" in err:
-            return {"username": username, "status": "unavailable", "premium": False, "collect": False, "reason": "not_found"}
+            try:
+                _su = await _find_user_by_search(client, username)
+            except Exception as _e:
+                if type(_e).__name__ == 'FloodWaitError':
+                    raise
+                _su = None
+            if _su is not None:
+                return _pack_found_user(username, _su)
+            return {"username": username, "status": "retry", "premium": False, "collect": False, "reason": "resolve_empty"}
         if "USERNAME_INVALID" in err:
             return {"username": username, "status": "invalid", "premium": False}
         return {"username": username, "status": "error", "error": err[:120], "premium": False}
@@ -2175,24 +2316,168 @@ async def lane_check_username(username):
 @app.route('/api/check/one', methods=['POST'])
 @require_auth
 def api_check_one():
-    _one = None
-    try:
-        pace_one_user()
-    except Exception:
-        pass
-    try:
-        _one = pick_rr_bot()
-    except Exception as _rr_e:
-        print('[rr]', _rr_e, flush=True)
+    """每个用户最多 2 个水军各查 1 次。两次都没有明确结果就跳过。"""
     data = request.json or {}
-    username = (data.get("username") or "").strip().lstrip("@")
+    username = (data.get('username') or '').strip().lstrip('@')
     if not username:
-        return jsonify(_apply_judgement({"error": "请提供用户名", "status": "error", "username": ""})), 400
-    try:
-        out = run_async(lane_check_username(username))
-        return jsonify(_apply_judgement(out or {"username": username, "status": "error", "error": "empty"}))
-    except Exception as e:
-        return jsonify(_apply_judgement({"username": username, "status": "error", "error": str(e)[:200]}))
+        return jsonify({"error": "缺少用户名", "status": "error"}), 400
+    config = load_config()
+    rows = []
+    for fn in ('list_workable_bots_by_ip', 'list_workable_bots'):
+        f = globals().get(fn)
+        if not f:
+            continue
+        try:
+            got = f(config) or []
+        except TypeError:
+            try:
+                got = f() or []
+            except Exception:
+                got = []
+        except Exception:
+            got = []
+        for b in got:
+            if isinstance(b, dict):
+                rows.append(b)
+    if not rows:
+        rows = [b for b in (config.get('bots') or []) if b.get('session_path')]
+    seen = set()
+    bots = []
+    for b in rows:
+        key = str(b.get('id') or b.get('phone') or b.get('session_path'))
+        if key in seen or not b.get('session_path'):
+            continue
+        seen.add(key)
+        bots.append(b)
+
+    resolves = 0
+    connects = 0
+    last_phone = ''
+    last_proxy = ''
+
+    def _fail(out):
+        if not isinstance(out, dict):
+            return True
+        st = str(out.get('status') or '')
+        reason = str(out.get('reason') or '')
+        err = str(out.get('error') or '')
+        if st in ('flood', 'retry', 'error'):
+            return True
+        if reason in ('not_found', 'resolve_empty', 'unauthorized'):
+            return True
+        if 'FloodWait' in err or 'FloodWait' in reason:
+            return True
+        if st == 'unavailable' and reason in ('', 'not_found', 'resolve_empty'):
+            return True
+        return False
+
+    for bot in bots:
+        if resolves >= 2 or connects >= 4:
+            break
+        sp = bot.get('session_path')
+        api_id = bot.get('api_id')
+        api_hash = bot.get('api_hash')
+        if not sp or not api_id or not api_hash:
+            continue
+        phone = str(bot.get('phone') or '')
+        raw_proxy = bot.get('proxy') or ''
+        if isinstance(raw_proxy, dict):
+            raw_proxy = raw_proxy.get('proxy') or raw_proxy.get('url') or ''
+        proxy_ip = str(raw_proxy).split(':')[0] if raw_proxy else ''
+        last_phone, last_proxy = phone, proxy_ip
+        bot_key = bot.get('id') or phone or sp
+        connects += 1
+        try:
+            proxy = parse_proxy(raw_proxy) if raw_proxy else None
+        except Exception:
+            proxy = None
+
+        async def _once(sp=sp, api_id=api_id, api_hash=api_hash, proxy=proxy, username=username):
+            from telethon import TelegramClient
+            from telethon.errors import FloodWaitError
+            kwargs = {}
+            if '_loop' in globals():
+                kwargs['loop'] = _loop
+            if proxy:
+                kwargs['proxy'] = proxy
+            client = TelegramClient(sp, int(api_id), str(api_hash), **kwargs)
+            try:
+                await client.connect()
+                if not await client.is_user_authorized():
+                    return {"username": username, "status": "retry", "reason": "unauthorized", "collect": False}
+                import asyncio as _aio
+                return await _aio.wait_for(await async_check_one_username(client, username), timeout=18)
+            except FloodWaitError as e:
+                return {"username": username, "status": "flood", "error": "FloodWait %ss" % e.seconds, "_flood_seconds": int(e.seconds), "collect": False}
+            except Exception as e:
+                msg = str(e)
+                if "FloodWait" in msg or type(e).__name__ == "FloodWaitError":
+                    return {"username": username, "status": "flood", "error": msg[:120], "collect": False}
+                return {"username": username, "status": "retry", "reason": "resolve_empty", "error": msg[:120], "collect": False}
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+        try:
+            out = run_async(_once())
+        except Exception as e:
+            out = {"username": username, "status": "retry", "reason": "resolve_empty", "error": str(e)[:120], "collect": False}
+        if not isinstance(out, dict):
+            out = {"username": username, "status": "retry", "collect": False}
+        st = str(out.get('status') or '')
+        reason = str(out.get('reason') or '')
+        err = str(out.get('error') or '')
+        err_l = err.lower()
+        is_flood = st == 'flood' or 'floodwait' in err_l or 'floodwait' in reason.lower()
+        is_transport = is_flood or reason == 'unauthorized' or 'timeout' in err_l or 'connection' in err_l
+        if is_transport:
+            print("[check2]", username, phone, "跳过不计次", st, reason or err[:80], flush=True)
+            if is_flood:
+                sec = int(out.get('_flood_seconds') or 60)
+                try:
+                    set_bot_cooldown(bot_key, max(sec, 30), reason=err or 'FloodWait')
+                except Exception:
+                    pass
+            continue
+        resolves += 1
+        print("[check2]", username, "try", resolves, phone, st, reason or err[:80], flush=True)
+        if _fail(out):
+            continue
+        if ' _apply_judgement' or '_apply_judgement' in globals():
+            try:
+                out = _apply_judgement(out)
+            except Exception:
+                pass
+        out['username'] = username
+        out['phone'] = phone
+        out['proxy_ip'] = proxy_ip
+        out['tries'] = resolves
+        out['drop'] = False
+        return jsonify(out)
+
+    if resolves < 2:
+        return jsonify({
+            "username": username,
+            "status": "flood",
+            "reason": "水军限流，未完成检测",
+            "collect": False,
+            "drop": False,
+            "phone": last_phone,
+            "proxy_ip": last_proxy,
+            "tries": resolves,
+        })
+    return jsonify({
+        "username": username,
+        "status": "skip",
+        "reason": "两次未检出",
+        "collect": False,
+        "drop": True,
+        "phone": last_phone,
+        "proxy_ip": last_proxy,
+        "tries": resolves,
+    })
 
 
 @app.route('/api/check/result', methods=['POST'])
